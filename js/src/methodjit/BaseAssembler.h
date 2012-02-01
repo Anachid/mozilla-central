@@ -791,6 +791,20 @@ static const JSC::MacroAssembler::RegisterID JSParamReg_Argc  = JSC::MIPSRegiste
         return branch32(cond, extent, key.reg());
     }
 
+    Jump guardElementNotHole(RegisterID elements, const Int32Key &key) {
+        Jump jmp;
+
+        if (key.isConstant()) {
+            Address slot(elements, key.index() * sizeof(Value));
+            jmp = guardNotHole(slot);
+        } else {
+            BaseIndex slot(elements, key.reg(), JSVAL_SCALE);
+            jmp = guardNotHole(slot);
+        }
+
+        return jmp;
+    }
+
     // Load a jsval from an array slot, given a key. |objReg| is clobbered.
     FastArrayLoadFails fastArrayLoad(RegisterID objReg, const Int32Key &key,
                                      RegisterID typeReg, RegisterID dataReg) {
@@ -831,7 +845,7 @@ static const JSC::MacroAssembler::RegisterID JSParamReg_Argc  = JSC::MIPSRegiste
 
     void loadFrameActuals(JSFunction *fun, RegisterID reg) {
         /* Bias for the case where there was an arguments overflow. */
-        load32(Address(JSFrameReg, StackFrame::offsetOfArgs()), reg);
+        load32(Address(JSFrameReg, StackFrame::offsetOfNumActual()), reg);
         add32(Imm32(fun->nargs + 2), reg);
         Jump overflowArgs = branchTest32(Assembler::NonZero,
                                          Address(JSFrameReg, StackFrame::offsetOfFlags()),

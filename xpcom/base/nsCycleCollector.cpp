@@ -1735,7 +1735,9 @@ GCGraphBuilder::NoteRoot(PRUint32 langID, void *root,
         return;
     }
 
-    AddNode(root, participant, langID);
+    if (!participant->CanSkipThis(root) || WantAllTraces()) {
+        AddNode(root, participant, langID);
+    }
 }
 
 NS_IMETHODIMP_(void)
@@ -1789,7 +1791,7 @@ GCGraphBuilder::NoteXPCOMChild(nsISupports *child)
     
     nsXPCOMCycleCollectionParticipant *cp;
     ToParticipant(child, &cp);
-    if (cp && !cp->CanSkipThis(child)) {
+    if (cp && (!cp->CanSkipThis(child) || WantAllTraces())) {
 
         PtrInfo *childPi = AddNode(child, cp, nsIProgrammingLanguage::CPLUSPLUS);
         if (!childPi)
@@ -1923,7 +1925,7 @@ AddPurpleRoot(GCGraphBuilder &builder, nsISupports *root)
     nsXPCOMCycleCollectionParticipant *cp;
     ToParticipant(root, &cp);
 
-    if (!cp->CanSkipInCC(root)) {
+    if (builder.WantAllTraces() || !cp->CanSkipInCC(root)) {
         PtrInfo *pinfo = builder.AddNode(root, cp,
                                          nsIProgrammingLanguage::CPLUSPLUS);
         if (!pinfo) {
@@ -2821,7 +2823,7 @@ nsCycleCollector::GCIfNeeded(bool aForceGC)
     // rt->Collect() must be called from the main thread,
     // because it invokes XPCJSRuntime::GCCallback(cx, JSGC_BEGIN)
     // which returns false if not in the main thread.
-    rt->Collect();
+    rt->Collect(js::gcreason::CC_FORCED, nsGCNormal);
 #ifdef COLLECT_TIME_DEBUG
     printf("cc: GC() took %lldms\n", (PR_Now() - start) / PR_USEC_PER_MSEC);
 #endif
@@ -3730,7 +3732,13 @@ public:
     {
         NS_ASSERTION(NS_IsMainThread(), "Wrong thread!");
 
-        mCollector->GCIfNeeded(false);
+        // On a WantAllTraces CC, force a synchronous global GC to prevent
+        // hijinks from ForgetSkippable and compartmental GCs.
+        bool wantAllTraces = false;
+        if (aListener) {
+            aListener->GetWantAllTraces(&wantAllTraces);
+        }
+        mCollector->GCIfNeeded(wantAllTraces);
 
         MutexAutoLock autoLock(mLock);
 
@@ -3746,10 +3754,13 @@ public:
             aListener = nsnull;
         mListener = aListener;
 
-        GetJSRuntime()->NotifyLeaveMainThread();
-        mRequest.Notify();
-        mReply.Wait();
-        GetJSRuntime()->NotifyEnterMainThread();
+        if (GetJSRuntime()->NotifyLeaveMainThread()) {
+            mRequest.Notify();
+            mReply.Wait();
+            GetJSRuntime()->NotifyEnterMainThread();
+        } else {
+            mCollected = mCollector->BeginCollection(mListener);
+        }
 
         mListener = nsnull;
 

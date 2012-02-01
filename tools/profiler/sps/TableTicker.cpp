@@ -47,13 +47,20 @@
 #include "mozilla/StringBuilder.h"
 
 // we eventually want to make this runtime switchable
-#if defined(XP_MACOSX) || defined(XP_UNIX)
+#if defined(MOZ_PROFILING) && (defined(XP_MACOSX) || defined(XP_UNIX))
  #ifndef ANDROID
   #define USE_BACKTRACE
  #endif
 #endif
 #ifdef USE_BACKTRACE
  #include <execinfo.h>
+#endif
+
+#if defined(MOZ_PROFILING) && defined(XP_WIN)
+ #define USE_NS_STACKWALK
+#endif
+#ifdef USE_NS_STACKWALK
+ #include "nsStackWalk.h"
 #endif
 
 using std::string;
@@ -151,6 +158,7 @@ class Profile
 public:
   Profile(int aEntrySize)
     : mWritePos(0)
+    , mLastFlushPos(0)
     , mReadPos(0)
     , mEntrySize(aEntrySize)
   {
@@ -173,6 +181,72 @@ public:
       mEntries[mReadPos] = ProfileEntry();
       mReadPos = (mReadPos + 1) % mEntrySize;
     }
+    // we also need to move the flush pos to ensure we
+    // do not pass it
+    if (mWritePos == mLastFlushPos) {
+      mLastFlushPos = (mLastFlushPos + 1) % mEntrySize;
+    }
+  }
+
+  // flush the new entries
+  void flush()
+  {
+    mLastFlushPos = mWritePos;
+  }
+
+  // discards all of the entries since the last flush()
+  // NOTE: that if mWritePos happens to wrap around past
+  // mLastFlushPos we actually only discard mWritePos - mLastFlushPos entries
+  //
+  // r = mReadPos
+  // w = mWritePos
+  // f = mLastFlushPos
+  //
+  //     r          f    w
+  // |-----------------------------|
+  // |   abcdefghijklmnopq         | -> 'abcdefghijklmnopq'
+  // |-----------------------------|
+  //
+  //
+  // mWritePos and mReadPos have passed mLastFlushPos
+  //                      f
+  //                    w r
+  // |-----------------------------|
+  // |ABCDEFGHIJKLMNOPQRSqrstuvwxyz|
+  // |-----------------------------|
+  //                       w
+  //                       r
+  // |-----------------------------|
+  // |ABCDEFGHIJKLMNOPQRSqrstuvwxyz| -> ''
+  // |-----------------------------|
+  //
+  //
+  // mWritePos will end up the same as mReadPos
+  //                r
+  //              w f
+  // |-----------------------------|
+  // |ABCDEFGHIJKLMklmnopqrstuvwxyz|
+  // |-----------------------------|
+  //                r
+  //                w
+  // |-----------------------------|
+  // |ABCDEFGHIJKLMklmnopqrstuvwxyz| -> ''
+  // |-----------------------------|
+  //
+  //
+  // mWritePos has moved past mReadPos
+  //      w r       f
+  // |-----------------------------|
+  // |ABCDEFdefghijklmnopqrstuvwxyz|
+  // |-----------------------------|
+  //        r       w
+  // |-----------------------------|
+  // |ABCDEFdefghijklmnopqrstuvwxyz| -> 'defghijkl'
+  // |-----------------------------|
+
+  void erase()
+  {
+    mWritePos = mLastFlushPos;
   }
 
   void ToString(StringBuilder &profile)
@@ -183,8 +257,9 @@ public:
       mSharedLibraryInfo = SharedLibraryInfo::GetInfoForSelf();
     }
 
+    //XXX: this code is not thread safe and needs to be fixed
     int oldReadPos = mReadPos;
-    while (mReadPos != mWritePos) {
+    while (mReadPos != mLastFlushPos) {
       profile.Append(mEntries[mReadPos].TagToString(this).c_str());
       mReadPos = (mReadPos + 1) % mEntrySize;
     }
@@ -199,8 +274,9 @@ public:
       mSharedLibraryInfo = SharedLibraryInfo::GetInfoForSelf();
     }
 
+    //XXX: this code is not thread safe and needs to be fixed
     int oldReadPos = mReadPos;
-    while (mReadPos != mWritePos) {
+    while (mReadPos != mLastFlushPos) {
       string tag = mEntries[mReadPos].TagToString(this);
       fwrite(tag.data(), 1, tag.length(), stream);
       mReadPos = (mReadPos + 1) % mEntrySize;
@@ -217,6 +293,7 @@ private:
   // for simplicity
   ProfileEntry *mEntries;
   int mWritePos; // points to the next entry we will write to
+  int mLastFlushPos; // points to the next entry since the last flush()
   int mReadPos;  // points to the next entry we will read to
   int mEntrySize;
   bool mNeedsSharedLibraryInfo;
@@ -245,6 +322,7 @@ class TableTicker: public Sampler {
   {
     mUseStackWalk = hasFeature(aFeatures, aFeatureCount, "stackwalk");
     mProfile.addTag(ProfileEntry('m', "Start"));
+    //XXX: It's probably worth splitting the jank profiler out from the regular profiler at some point
     mJankOnly = hasFeature(aFeatures, aFeatureCount, "jank");
   }
 
@@ -272,7 +350,12 @@ class TableTicker: public Sampler {
   {
     return &mProfile;
   }
- private:
+
+private:
+  // Not implemented on platforms which do not support backtracing
+  void doBacktrace(Profile &aProfile);
+
+private:
   Profile mProfile;
   Stack *mStack;
   bool mSaveRequested;
@@ -337,8 +420,7 @@ void TableTicker::HandleSaveRequest()
 }
 
 #ifdef USE_BACKTRACE
-static
-void doBacktrace(Profile &aProfile)
+void TableTicker::doBacktrace(Profile &aProfile)
 {
   void *array[100];
   int count = backtrace (array, 100);
@@ -348,6 +430,45 @@ void doBacktrace(Profile &aProfile)
   for (int i = 0; i < count; i++) {
     if( (intptr_t)array[i] == -1 ) break;
     aProfile.addTag(ProfileEntry('l', (const char*)array[i]));
+  }
+}
+#endif
+
+#ifdef USE_NS_STACKWALK
+typedef struct {
+  void** array;
+  size_t size;
+  size_t count;
+} PCArray;
+
+static
+void StackWalkCallback(void* aPC, void* aClosure)
+{
+  PCArray* array = static_cast<PCArray*>(aClosure);
+  if (array->count >= array->size) {
+    // too many frames, ignore
+    return;
+  }
+  array->array[array->count++] = aPC;
+}
+
+void TableTicker::doBacktrace(Profile &aProfile)
+{
+  uintptr_t thread = GetThreadHandle(platform_data());
+  MOZ_ASSERT(thread);
+  void* pc_array[1000];
+  PCArray array = {
+    pc_array,
+    mozilla::ArrayLength(pc_array),
+    0
+  };
+  nsresult rv = NS_StackWalk(StackWalkCallback, 0, &array, thread);
+  if (NS_SUCCEEDED(rv)) {
+    aProfile.addTag(ProfileEntry('s', "XRE_Main", 0));
+
+    for (size_t i = array.count; i > 0; --i) {
+      aProfile.addTag(ProfileEntry('l', (const char*)array.array[i - 1]));
+    }
   }
 }
 #endif
@@ -371,6 +492,18 @@ void doSampleStackTrace(Stack *aStack, Profile &aProfile, TickSample *sample)
   }
 }
 
+/* used to keep track of the last event that we sampled during */
+unsigned int sLastSampledEventGeneration = 0;
+
+/* a counter that's incremented everytime we get responsiveness event
+ * note: it might also be worth tracking everytime we go around
+ * the event loop */
+unsigned int sCurrentEventGeneration = 0;
+/* we don't need to worry about overflow because we only treat the
+ * case of them being the same as special. i.e. we only run into
+ * a problem if 2^32 events happen between samples that we need
+ * to know are associated with different events */
+
 void TableTicker::Tick(TickSample* sample)
 {
   // Marker(s) come before the sample
@@ -381,6 +514,16 @@ void TableTicker::Tick(TickSample* sample)
     marker = mStack->getMarker(i++);
   }
   mStack->mQueueClearMarker = true;
+
+  // if we are on a different event we can discard any temporary samples
+  // we've kept around
+  if (sLastSampledEventGeneration != sCurrentEventGeneration) {
+    // XXX: we also probably want to add an entry to the profile to help
+    // distinguish which samples are part of the same event. That, or record
+    // the event generation in each sample
+    mProfile.erase();
+  }
+  sLastSampledEventGeneration = sCurrentEventGeneration;
 
   bool recordSample = true;
   if (mJankOnly) {
@@ -394,17 +537,18 @@ void TableTicker::Tick(TickSample* sample)
     }
   }
 
-  if (recordSample) {
-#ifdef USE_BACKTRACE
-    if (mUseStackWalk) {
-      doBacktrace(mProfile);
-    } else {
-      doSampleStackTrace(mStack, mProfile, sample);
-    }
-#else
+#if defined(USE_BACKTRACE) || defined(USE_NS_STACKWALK)
+  if (mUseStackWalk) {
+    doBacktrace(mProfile);
+  } else {
     doSampleStackTrace(mStack, mProfile, sample);
-#endif
   }
+#else
+  doSampleStackTrace(mStack, mProfile, sample);
+#endif
+
+  if (recordSample)
+    mProfile.flush();
 
   if (!mJankOnly && !sLastTracerEvent.IsNull() && sample) {
     TimeDuration delta = sample->timestamp - sLastTracerEvent;
@@ -542,7 +686,7 @@ char* mozilla_sampler_get_profile()
 const char** mozilla_sampler_get_features()
 {
   static const char* features[] = {
-#ifdef MOZ_PROFILING && USE_BACKTRACE
+#if defined(MOZ_PROFILING) && (defined(USE_BACKTRACE) || defined(USE_NS_STACKWALK))
     "stackwalk",
 #endif
     NULL
@@ -609,6 +753,7 @@ void mozilla_sampler_responsiveness(TimeStamp aTime)
     TimeDuration delta = aTime - sLastTracerEvent;
     sResponsivenessTimes[sResponsivenessLoc++] = delta.ToMilliseconds();
   }
+  sCurrentEventGeneration++;
 
   sLastTracerEvent = aTime;
 }
