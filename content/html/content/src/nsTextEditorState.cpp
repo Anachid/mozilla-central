@@ -217,6 +217,7 @@ public:
   NS_IMETHOD ScrollCharacter(bool aRight);
   NS_IMETHOD SelectAll(void);
   NS_IMETHOD CheckVisibility(nsIDOMNode *node, PRInt16 startOffset, PRInt16 EndOffset, bool *_retval);
+  virtual nsresult CheckVisibilityContent(nsIContent* aNode, PRInt16 aStartOffset, PRInt16 aEndOffset, bool* aRetval);
 
 private:
   nsRefPtr<nsFrameSelection> mFrameSelection;
@@ -604,6 +605,22 @@ nsTextInputSelectionImpl::CheckVisibility(nsIDOMNode *node, PRInt16 startOffset,
   }
   return NS_ERROR_FAILURE;
 
+}
+
+nsresult
+nsTextInputSelectionImpl::CheckVisibilityContent(nsIContent* aNode,
+                                                 PRInt16 aStartOffset,
+                                                 PRInt16 aEndOffset,
+                                                 bool* aRetval)
+{
+  if (!mPresShellWeak) {
+    return NS_ERROR_NOT_INITIALIZED;
+  }
+
+  nsCOMPtr<nsISelectionController> shell = do_QueryReferent(mPresShellWeak);
+  NS_ENSURE_TRUE(shell, NS_ERROR_FAILURE);
+
+  return shell->CheckVisibilityContent(aNode, aStartOffset, aEndOffset, aRetval);
 }
 
 class nsTextInputListener : public nsISelectionListener,
@@ -1160,10 +1177,6 @@ nsTextEditorState::PrepareEditor(const nsAString *aValue)
   // All nsTextControlFrames are widgets
   editorFlags |= nsIPlaintextEditor::eEditorWidgetMask;
 
-  // Use async reflow and painting for text widgets to improve
-  // performance.
-  editorFlags |= nsIPlaintextEditor::eEditorUseAsyncUpdatesMask;
-  
   // Spell check is diabled at creation time. It is enabled once
   // the editor comes into focus.
   editorFlags |= nsIPlaintextEditor::eEditorSkipSpellCheck;
@@ -1314,12 +1327,7 @@ nsTextEditorState::PrepareEditor(const nsAString *aValue)
   // editor for us.
 
   if (!defaultValue.IsEmpty()) {
-    // Avoid causing reentrant painting and reflowing by telling the editor
-    // that we don't want it to force immediate view refreshes or force
-    // immediate reflows during any editor calls.
-
-    rv = newEditor->SetFlags(editorFlags |
-                             nsIPlaintextEditor::eEditorUseAsyncUpdatesMask);
+    rv = newEditor->SetFlags(editorFlags);
     NS_ENSURE_SUCCESS(rv, rv);
 
     // Now call SetValue() which will make the necessary editor calls to set
@@ -1837,7 +1845,6 @@ nsTextEditorState::SetValue(const nsAString& aValue, bool aUserInput)
         flags = savedFlags;
         flags &= ~(nsIPlaintextEditor::eEditorDisabledMask);
         flags &= ~(nsIPlaintextEditor::eEditorReadonlyMask);
-        flags |= nsIPlaintextEditor::eEditorUseAsyncUpdatesMask;
         flags |= nsIPlaintextEditor::eEditorDontEchoPassword;
         mEditor->SetFlags(flags);
 

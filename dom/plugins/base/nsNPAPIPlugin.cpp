@@ -2383,7 +2383,10 @@ _getvalue(NPP npp, NPNVariable variable, void *result)
 
     case kJavaContext_ANPGetValue: {
       LOG("get context");
-      JNIEnv* env    = GetJNIForThread();
+      JNIEnv* env = GetJNIForThread();
+      if (!env)
+        return NPERR_GENERIC_ERROR;
+
       jclass cls     = env->FindClass("org/mozilla/gecko/GeckoApp");
       jfieldID field = env->GetStaticFieldID(cls, "mAppContext",
                                              "Lorg/mozilla/gecko/GeckoApp;");
@@ -2507,7 +2510,7 @@ _setvalue(NPP npp, NPPVariable variable, void *result)
 #ifdef MOZ_WIDGET_ANDROID
   case kRequestDrawingModel_ANPSetValue:
     if (inst)
-      inst->SetDrawingModel(NS_PTR_TO_INT32(result));
+      inst->SetANPDrawingModel(NS_PTR_TO_INT32(result));
     return NPERR_NO_ERROR;
   case kAcceptEvents_ANPSetValue:
     return NPERR_NO_ERROR;

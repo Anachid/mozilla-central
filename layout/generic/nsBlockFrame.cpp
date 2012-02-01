@@ -563,11 +563,11 @@ nsBlockFrame::GetCaretBaseline() const
     }
   }
   nsRefPtr<nsFontMetrics> fm;
-  nsLayoutUtils::GetFontMetricsForFrame(this, getter_AddRefs(fm),
-    nsLayoutUtils::FontSizeInflationFor(this));
+  float inflation =
+    nsLayoutUtils::FontSizeInflationFor(this, nsLayoutUtils::eNotInReflow);
+  nsLayoutUtils::GetFontMetricsForFrame(this, getter_AddRefs(fm), inflation);
   return nsLayoutUtils::GetCenteredFontBaseline(fm, nsHTMLReflowState::
-      CalcLineHeight(GetStyleContext(), contentRect.height,
-      nsLayoutUtils::FontSizeInflationFor(this))) +
+      CalcLineHeight(GetStyleContext(), contentRect.height, inflation)) +
     bp.top;
 }
 
@@ -920,13 +920,6 @@ CalculateContainingBlockSizeForAbsolutes(const nsHTMLReflowState& aReflowState,
   return cbSize;
 }
 
-static inline bool IsClippingChildren(nsIFrame* aFrame,
-                                        const nsHTMLReflowState& aReflowState)
-{
-  return aReflowState.mStyleDisplay->mOverflowX == NS_STYLE_OVERFLOW_CLIP ||
-    nsFrame::ApplyPaginatedOverflowClipping(aFrame);
-}
-
 NS_IMETHODIMP
 nsBlockFrame::Reflow(nsPresContext*           aPresContext,
                      nsHTMLReflowMetrics&     aMetrics,
@@ -958,7 +951,7 @@ nsBlockFrame::Reflow(nsPresContext*           aPresContext,
   // make sure our kids fit too.
   if (aReflowState.availableHeight != NS_UNCONSTRAINEDSIZE &&
       aReflowState.ComputedHeight() != NS_AUTOHEIGHT &&
-      IsClippingChildren(this, aReflowState)) {
+      ApplyOverflowClipping(this, aReflowState.mStyleDisplay)) {
     nsMargin heightExtras = aReflowState.mComputedBorderPadding;
     if (GetSkipSides() & NS_SIDE_TOP) {
       heightExtras.top = 0;
@@ -1019,7 +1012,7 @@ nsBlockFrame::Reflow(nsPresContext*           aPresContext,
   // ALWAYS drain overflow. We never want to leave the previnflow's
   // overflow lines hanging around; block reflow depends on the
   // overflow line lists being cleared out between reflow passes.
-  DrainOverflowLines(state);
+  DrainOverflowLines();
 
   // Handle paginated overflow (see nsContainerFrame.h)
   nsOverflowAreas ocBounds;
@@ -1122,7 +1115,9 @@ nsBlockFrame::Reflow(nsPresContext*           aPresContext,
   // Compute our final size
   nscoord bottomEdgeOfChildren;
   ComputeFinalSize(*reflowState, state, aMetrics, &bottomEdgeOfChildren);
-  ComputeOverflowAreas(*reflowState, aMetrics, bottomEdgeOfChildren);
+  nsRect areaBounds = nsRect(0, 0, aMetrics.width, aMetrics.height);
+  ComputeOverflowAreas(areaBounds, reflowState->mStyleDisplay,
+                       bottomEdgeOfChildren, aMetrics.mOverflowAreas);
   // Factor overflow container child bounds into the overflow area
   aMetrics.mOverflowAreas.UnionWith(ocBounds);
   // Factor pushed float child bounds into the overflow area
@@ -1452,17 +1447,16 @@ nsBlockFrame::ComputeFinalSize(const nsHTMLReflowState& aReflowState,
 }
 
 void
-nsBlockFrame::ComputeOverflowAreas(const nsHTMLReflowState& aReflowState,
-                                   nsHTMLReflowMetrics&     aMetrics,
-                                   nscoord                  aBottomEdgeOfChildren)
+nsBlockFrame::ComputeOverflowAreas(const nsRect&         aBounds,
+                                   const nsStyleDisplay* aDisplay,
+                                   nscoord               aBottomEdgeOfChildren,
+                                   nsOverflowAreas&      aOverflowAreas)
 {
   // Compute the overflow areas of our children
   // XXX_perf: This can be done incrementally.  It is currently one of
   // the things that makes incremental reflow O(N^2).
-  nsRect bounds(0, 0, aMetrics.width, aMetrics.height);
-  nsOverflowAreas areas(bounds, bounds);
-
-  if (!IsClippingChildren(this, aReflowState)) {
+  nsOverflowAreas areas(aBounds, aBounds);
+  if (!ApplyOverflowClipping(this, aDisplay)) {
     for (line_iterator line = begin_lines(), line_end = end_lines();
          line != line_end;
          ++line) {
@@ -1478,24 +1472,15 @@ nsBlockFrame::ComputeOverflowAreas(const nsHTMLReflowState& aReflowState,
       areas.UnionAllWith(mBullet->GetRect());
     }
 
-    // Factor in the bottom edge of the children. Child frames
-    // will be added to the overflow area as we iterate through the lines,
-    // but their margins won't, so we need to account for bottom margins
-    // here. If we're a scrolled block then we also need to account
-    // for the scrollframe's padding, which is logically below the
-    // bottom margins of the children.
-    nscoord bottomEdgeOfContents = aBottomEdgeOfChildren;
-    if (GetStyleContext()->GetPseudo() == nsCSSAnonBoxes::scrolledContent) {
-      // We're a scrolled frame; the scrollframe's padding should be added
-      // to the bottom edge of the children
-      bottomEdgeOfContents += aReflowState.mComputedPadding.bottom;
-    }
+    // Factor in the bottom edge of the children.  Child frames will be added
+    // to the overflow area as we iterate through the lines, but their margins
+    // won't, so we need to account for bottom margins here.
     // REVIEW: For now, we do this for both visual and scrollable area,
     // although when we make scrollable overflow area not be a subset of
     // visual, we can change this.
     NS_FOR_FRAME_OVERFLOW_TYPES(otype) {
       nsRect& o = areas.Overflow(otype);
-      o.height = NS_MAX(o.YMost(), bottomEdgeOfContents) - o.y;
+      o.height = NS_MAX(o.YMost(), aBottomEdgeOfChildren) - o.y;
     }
   }
 #ifdef NOISY_COMBINED_AREA
@@ -1503,7 +1488,31 @@ nsBlockFrame::ComputeOverflowAreas(const nsHTMLReflowState& aReflowState,
   printf(": ca=%d,%d,%d,%d\n", area.x, area.y, area.width, area.height);
 #endif
 
-  aMetrics.mOverflowAreas = areas;
+  aOverflowAreas = areas;
+}
+
+bool
+nsBlockFrame::UpdateOverflow()
+{
+  // We need to update the overflow areas of lines manually, as they
+  // get cached and re-used otherwise. Lines aren't exposed as normal
+  // frame children, so calling UnionChildOverflow alone will end up
+  // using the old cached values.
+  for (line_iterator line = begin_lines(), line_end = end_lines();
+       line != line_end;
+       ++line) {
+    nsOverflowAreas lineAreas;
+
+    PRInt32 n = line->GetChildCount();
+    for (nsIFrame* lineFrame = line->mFirstChild;
+         n > 0; lineFrame = lineFrame->GetNextSibling(), --n) {
+      ConsiderChildOverflow(lineAreas, lineFrame);
+    }
+
+    line->SetOverflowAreas(lineAreas);
+  }
+
+  return nsBlockFrameSuper::UpdateOverflow();
 }
 
 nsresult
@@ -2337,7 +2346,7 @@ nsBlockFrame::ReflowDirtyLines(nsBlockReflowState& aState)
 
       nsRefPtr<nsFontMetrics> fm;
       nsLayoutUtils::GetFontMetricsForFrame(this, getter_AddRefs(fm),
-        nsLayoutUtils::FontSizeInflationFor(aState.mReflowState));
+        nsLayoutUtils::FontSizeInflationFor(this, nsLayoutUtils::eInReflow));
       aState.mReflowState.rendContext->SetFont(fm); // FIXME: needed?
 
       nscoord minAscent =
@@ -4430,7 +4439,7 @@ nsBlockFrame::PushLines(nsBlockReflowState&  aState,
 // the invariant that the property is never set if the list is empty.
 
 bool
-nsBlockFrame::DrainOverflowLines(nsBlockReflowState& aState)
+nsBlockFrame::DrainOverflowLines()
 {
 #ifdef DEBUG
   VerifyOverflowSituation();

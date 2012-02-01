@@ -3605,32 +3605,37 @@ IsElementVisible(dom::Element* aElement)
 
   nsIContent *cur = aElement;
   for (; ;) {
+    // Walk up the tree looking for the nearest ancestor with a frame.
+    // The state of the child right below it will determine whether
+    // we might possibly have a frame or not.
+    bool haveLazyBitOnChild = cur->HasFlag(NODE_NEEDS_FRAME);
     cur = cur->GetFlattenedTreeParent();
     if (!cur) {
-      // None of our ancestors have lazy bits set, so we shouldn't have a frame
-      return false;
+      if (!haveLazyBitOnChild) {
+        // None of our ancestors have lazy bits set, so we shouldn't
+        // have a frame
+        return false;
+      }
+
+      // The root has a lazy frame construction bit.  We need to check
+      // our style.
+      break;
     }
 
     if (cur->GetPrimaryFrame()) {
-      // None of our ancestors up to the nearest ancestor with a frame have
-      // lazy bits; that means we won't get a frame
-      return false;
-    }
-
-    if (cur->HasFlag(NODE_NEEDS_FRAME)) {
-      // Double-check that the parent doesn't have a leaf frame
-      nsIContent *parent = cur->GetFlattenedTreeParent();
-      if (parent) {
-        NS_ASSERTION(parent->GetPrimaryFrame(),
-                     "Why does our parent not have a frame?");
-        if (parent->GetPrimaryFrame()->IsLeaf()) {
-          // No frame for us
-          return false;
-        }
+      if (!haveLazyBitOnChild) {
+        // Our ancestor directly under |cur| doesn't have lazy bits;
+        // that means we won't get a frame
+        return false;
       }
 
-      // |cur| will get a frame sometime.  What does that mean for us?
-      // |We have to figure that out!
+      if (cur->GetPrimaryFrame()->IsLeaf()) {
+        // Nothing under here will ever get frames
+        return false;
+      }
+
+      // Otherwise, we might end up with a frame when that lazy bit is
+      // processed.  Figure out our actual style.
       break;
     }
   }
@@ -4206,15 +4211,6 @@ nsresult nsEditor::BeginUpdateViewBatch()
       nsCOMPtr<nsISelectionPrivate> selPrivate(do_QueryInterface(selection));
       selPrivate->StartBatchChanges();
     }
-
-    // Turn off view updating.
-    nsCOMPtr<nsIPresShell> ps = GetPresShell();
-    if (ps) {
-      nsCOMPtr<nsIViewManager> viewManager = ps->GetViewManager();
-      if (viewManager) {
-        mBatch.BeginUpdateViewBatch(viewManager);
-      }
-    }
   }
 
   mUpdateCount++;
@@ -4249,20 +4245,6 @@ nsresult nsEditor::EndUpdateViewBatch()
       caret = presShell->GetCaret();
 
     StCaretHider caretHider(caret);
-
-    PRUint32 flags = 0;
-
-    GetFlags(&flags);
-
-    // Turn view updating back on.
-    PRUint32 updateFlag = NS_VMREFRESH_IMMEDIATE;
-
-    // If we're doing async updates, use NS_VMREFRESH_DEFERRED here, so that
-    // the reflows we caused will get processed before the invalidates.
-    if (flags & nsIPlaintextEditor::eEditorUseAsyncUpdatesMask) {
-      updateFlag = NS_VMREFRESH_DEFERRED;
-    }
-    mBatch.EndUpdateViewBatch(updateFlag);
 
     // Turn selection updating and notifications back on.
 
@@ -4980,19 +4962,8 @@ nsEditor::CreateRange(nsIDOMNode *aStartParent, PRInt32 aStartOffset,
                       nsIDOMNode *aEndParent, PRInt32 aEndOffset,
                       nsIDOMRange **aRange)
 {
-  NS_ADDREF(*aRange = new nsRange());
-
-  nsresult result = (*aRange)->SetStart(aStartParent, aStartOffset);
-
-  if (NS_SUCCEEDED(result))
-    result = (*aRange)->SetEnd(aEndParent, aEndOffset);
-
-  if (NS_FAILED(result))
-  {
-    NS_RELEASE((*aRange));
-    *aRange = 0;
-  }
-  return result;
+  return nsRange::CreateRange(aStartParent, aStartOffset, aEndParent,
+                              aEndOffset, aRange);
 }
 
 nsresult 

@@ -87,12 +87,15 @@
 #include "Layers.h"
 #include "LayerManagerOGL.h"
 #include "GLContext.h"
+#include "mozilla/layers/CompositorCocoaWidgetHelper.h"
 
 #include "mozilla/Preferences.h"
 
 #include <dlfcn.h>
 
 #include <ApplicationServices/ApplicationServices.h>
+
+#include "sampler.h"
 
 using namespace mozilla;
 using namespace mozilla::layers;
@@ -1398,7 +1401,7 @@ static void blinkRgn(RgnHandle rgn)
 #endif
 
 // Invalidate this component's visible area
-NS_IMETHODIMP nsChildView::Invalidate(const nsIntRect &aRect, bool aIsSynchronous)
+NS_IMETHODIMP nsChildView::Invalidate(const nsIntRect &aRect)
 {
   NS_OBJC_BEGIN_TRY_ABORT_BLOCK_NSRESULT;
 
@@ -1408,10 +1411,7 @@ NS_IMETHODIMP nsChildView::Invalidate(const nsIntRect &aRect, bool aIsSynchronou
   NSRect r;
   nsCocoaUtils::GeckoRectToNSRect(aRect, r);
   
-  if (aIsSynchronous) {
-    [mView displayRect:r];
-  }
-  else if ([NSView focusView]) {
+  if ([NSView focusView]) {
     // if a view is focussed (i.e. being drawn), then postpone the invalidate so that we
     // don't lose it.
     [mView setNeedsPendingDisplayInRect:r];
@@ -1440,15 +1440,6 @@ inline PRUint16 COLOR8TOCOLOR16(PRUint8 color8)
 {
   // return (color8 == 0xFF ? 0xFFFF : (color8 << 8));
   return (color8 << 8) | color8;  /* (color8 * 257) == (color8 * 0x0101) */
-}
-
-// The OS manages repaints well enough on its own, so we don't have to
-// flush them out here.  In other words, the OS will automatically call
-// displayIfNeeded at the appropriate times, so we don't need to do it
-// ourselves.  See bmo bug 459319.
-NS_IMETHODIMP nsChildView::Update()
-{
-  return NS_OK;
 }
 
 #pragma mark -
@@ -1782,6 +1773,22 @@ NSView<mozView>* nsChildView::GetEditorView()
 
 #pragma mark -
 
+void
+nsChildView::CreateCompositor()
+{
+  nsBaseWidget::CreateCompositor();
+  if (mCompositorChild) {
+    LayerManagerOGL *manager =
+      static_cast<LayerManagerOGL*>(compositor::GetLayerManager(mCompositorParent));
+
+    NSOpenGLContext *glContext =
+      (NSOpenGLContext *) manager->gl()->GetNativeData(GLContext::NativeGLContext);
+
+    [(ChildView *)mView setGLContext:glContext];
+    [(ChildView *)mView setUsingOMTCompositor:true];
+  }
+}
+
 gfxASurface*
 nsChildView::GetThebesSurface()
 {
@@ -1826,7 +1833,7 @@ DrawResizer(CGContextRef aCtx)
 }
 
 void
-nsChildView::DrawOver(LayerManager* aManager, nsIntRect aRect)
+nsChildView::DrawWindowOverlay(LayerManager* aManager, nsIntRect aRect)
 {
   if (!ShowsResizeIndicator(nsnull)) {
     return;
@@ -2102,6 +2109,16 @@ NSEvent* gLastDragMouseDownEvent = nil;
 
   [mGLContext clearDrawable];
   [mGLContext setView:self];
+
+  NS_OBJC_END_TRY_ABORT_BLOCK;
+}
+
+- (void)setGLContext:(NSOpenGLContext *)aGLContext
+{
+  NS_OBJC_BEGIN_TRY_ABORT_BLOCK;
+
+  mGLContext = aGLContext;
+  [mGLContext retain];
 
   NS_OBJC_END_TRY_ABORT_BLOCK;
 }
@@ -2489,6 +2506,7 @@ NSEvent* gLastDragMouseDownEvent = nil;
 
 - (void)drawRect:(NSRect)aRect inContext:(CGContextRef)aContext
 {
+  SAMPLE_LABEL("widget", "ChildView::drawRect");
   bool isVisible;
   if (!mGeckoChild || NS_FAILED(mGeckoChild->IsVisible(isVisible)) ||
       !isVisible)
@@ -2520,6 +2538,7 @@ NSEvent* gLastDragMouseDownEvent = nil;
 #endif
   // Create the event so we can fill in its region
   nsPaintEvent paintEvent(true, NS_PAINT, mGeckoChild);
+  paintEvent.didSendWillPaint = true;
 
   nsIntRect boundingRect =
     nsIntRect(aRect.origin.x, aRect.origin.y, aRect.size.width, aRect.size.height);
@@ -2554,13 +2573,18 @@ NSEvent* gLastDragMouseDownEvent = nil;
   }
 #endif
 
-  if (mGeckoChild->GetLayerManager(nsnull)->GetBackendType() == LayerManager::LAYERS_OPENGL) {
-    LayerManagerOGL *manager = static_cast<LayerManagerOGL*>(mGeckoChild->GetLayerManager(nsnull));
-    manager->SetClippingRegion(paintEvent.region); 
+  LayerManager *layerManager = mGeckoChild->GetLayerManager(nsnull);
+  if (layerManager->GetBackendType() == LayerManager::LAYERS_OPENGL) {
+    NSOpenGLContext *glContext;
+
+    LayerManagerOGL *manager = static_cast<LayerManagerOGL*>(layerManager);
+    manager->SetClippingRegion(paintEvent.region);
+    glContext = (NSOpenGLContext *)manager->gl()->GetNativeData(mozilla::gl::GLContext::NativeGLContext);
+
     if (!mGLContext) {
-      mGLContext = (NSOpenGLContext *)manager->gl()->GetNativeData(mozilla::gl::GLContext::NativeGLContext);
-      [mGLContext retain];
+      [self setGLContext:glContext];
     }
+
     mGeckoChild->DispatchWindowEvent(paintEvent);
 
     // Force OpenGL to refresh the very first time we draw. This works around a
@@ -2598,6 +2622,16 @@ NSEvent* gLastDragMouseDownEvent = nil;
     nsBaseWidget::AutoLayerManagerSetup
       setupLayerManager(mGeckoChild, targetContext, BasicLayerManager::BUFFER_NONE);
     painted = mGeckoChild->DispatchWindowEvent(paintEvent);
+  }
+
+  // Force OpenGL to refresh the very first time we draw. This works around a
+  // Mac OS X bug that stops windows updating on OS X when we use OpenGL.
+  if (painted && !mDidForceRefreshOpenGL &&
+      layerManager->AsShadowManager() && mUsingOMTCompositor) {
+    if (!mDidForceRefreshOpenGL) {
+      [self performSelector:@selector(forceRefreshOpenGL) withObject:nil afterDelay:0];
+      mDidForceRefreshOpenGL = YES;
+    }
   }
 
   if (!painted && [self isOpaque]) {
@@ -3136,6 +3170,12 @@ NSEvent* gLastDragMouseDownEvent = nil;
   mSwipeAnimationCancelled = &animationCancelled;
 }
 #endif // #ifdef __LP64__
+
+- (void)setUsingOMTCompositor:(BOOL)aUseOMTC
+{
+  mUsingOMTCompositor = aUseOMTC;
+}
+
 
 // Returning NO from this method only disallows ordering on mousedown - in order
 // to prevent it for mouseup too, we need to call [NSApp preventWindowOrdering]

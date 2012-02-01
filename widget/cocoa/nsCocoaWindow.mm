@@ -1062,17 +1062,14 @@ NS_METHOD nsCocoaWindow::PlaceBehind(nsTopLevelWidgetZPlacement aPlacement,
   return NS_OK;
 }
 
-// Note bug 278777, we need to update state when the window is unminimized
-// from the dock by users.
 NS_METHOD nsCocoaWindow::SetSizeMode(PRInt32 aMode)
 {
   NS_OBJC_BEGIN_TRY_ABORT_BLOCK_NSRESULT;
 
-  PRInt32 previousMode;
-  nsBaseWidget::GetSizeMode(&previousMode);
-
-  nsresult rv = nsBaseWidget::SetSizeMode(aMode);
-  NS_ENSURE_SUCCESS(rv, rv);
+  // mSizeMode will be updated in DispatchSizeModeEvent, which will be called
+  // from a delegate method that handles the state change during one of the
+  // calls below.
+  nsSizeMode previousMode = mSizeMode;
 
   if (aMode == nsSizeMode_Normal) {
     if ([mWindow isMiniaturized])
@@ -1279,18 +1276,10 @@ NS_IMETHODIMP nsCocoaWindow::SetTitle(const nsAString& aTitle)
   NS_OBJC_END_TRY_ABORT_BLOCK_NSRESULT;
 }
 
-NS_IMETHODIMP nsCocoaWindow::Invalidate(const nsIntRect & aRect, bool aIsSynchronous)
+NS_IMETHODIMP nsCocoaWindow::Invalidate(const nsIntRect & aRect)
 {
   if (mPopupContentView)
-    return mPopupContentView->Invalidate(aRect, aIsSynchronous);
-
-  return NS_OK;
-}
-
-NS_IMETHODIMP nsCocoaWindow::Update()
-{
-  if (mPopupContentView)
-    return mPopupContentView->Update();
+    return mPopupContentView->Invalidate(aRect);
 
   return NS_OK;
 }
@@ -1427,8 +1416,13 @@ nsCocoaWindow::ReportMoveEvent()
 void
 nsCocoaWindow::DispatchSizeModeEvent()
 {
+  nsSizeMode newMode = GetWindowSizeMode(mWindow);
+  if (mSizeMode == newMode)
+    return;
+
+  mSizeMode = newMode;
   nsSizeModeEvent event(true, NS_SIZEMODE, this);
-  event.mSizeMode = GetWindowSizeMode(mWindow);
+  event.mSizeMode = mSizeMode;
   event.time = PR_IntervalNow();
 
   nsEventStatus status = nsEventStatus_eIgnore;

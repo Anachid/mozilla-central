@@ -41,7 +41,6 @@
 #include "nsCaretAccessible.h"
 #include "nsDocAccessibleWrap.h"
 
-#include "nsIAccessibleDocument.h"
 #ifdef MOZ_XUL
 #include "nsXULTreeAccessible.h"
 #endif
@@ -128,8 +127,7 @@ protected:
 
     PRUint32 GetChromeFlags();
 #endif
-    already_AddRefed<nsIDocShellTreeItem>
-           GetContentDocShell(nsIDocShellTreeItem *aStart);
+
     nsRefPtr<nsCaretAccessible> mCaretAccessible;
 };
 
