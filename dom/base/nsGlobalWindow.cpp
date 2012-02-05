@@ -7680,9 +7680,9 @@ void nsGlobalWindow::UpdateTouchState()
 
     nsCOMPtr<nsIObserverService> observerService =
       do_GetService(NS_OBSERVERSERVICE_CONTRACTID);
+
     if (observerService) {
-      nsPIDOMWindow *inner = GetCurrentInnerWindowInternal();
-      observerService->NotifyObservers(mainWidget,
+      observerService->NotifyObservers(static_cast<nsIDOMWindow*>(this),
                                        DOM_TOUCH_LISTENER_ADDED,
                                        nsnull);
     }
@@ -10294,6 +10294,16 @@ nsGlobalWindow::SizeOf() const
   size += mNavigator ? mNavigator->SizeOf() : 0;
 
   return size;
+}
+
+size_t
+nsGlobalWindow::SizeOfStyleSheets(nsMallocSizeOfFun aMallocSizeOf) const
+{
+  size_t n = 0;
+  if (IsInnerWindow() && mDoc) {
+    n += mDoc->SizeOfStyleSheets(aMallocSizeOf);
+  }
+  return n;
 }
 
 // nsGlobalChromeWindow implementation

@@ -630,6 +630,10 @@ inline void
 JSObject::moveDenseArrayElementsUnbarriered(uintN dstStart, uintN srcStart, uintN count)
 {
     JS_ASSERT(!compartment()->needsBarrier());
+
+    JS_ASSERT(dstStart + count <= getDenseArrayCapacity());
+    JS_ASSERT(srcStart + count <= getDenseArrayCapacity());
+
     memmove(elements + dstStart, elements + srcStart, count * sizeof(js::Value));
 }
 
@@ -1595,6 +1599,16 @@ NewObjectCache::fillType(EntryIndex entry, Class *clasp, js::types::TypeObject *
     return fill(entry, clasp, type, kind, obj);
 }
 
+inline void
+NewObjectCache::copyCachedToObject(JSObject *dst, JSObject *src)
+{
+    js_memcpy(dst, src, dst->sizeOfThis());
+#ifdef JSGC_GENERATIONAL
+    Shape::writeBarrierPost(dst->shape_, &dst->shape_);
+    types::TypeObject::writeBarrierPost(dst->type_, &dst->type_);
+#endif
+}
+
 inline JSObject *
 NewObjectCache::newObjectFromHit(JSContext *cx, EntryIndex entry_)
 {
@@ -1603,7 +1617,7 @@ NewObjectCache::newObjectFromHit(JSContext *cx, EntryIndex entry_)
 
     JSObject *obj = js_TryNewGCObject(cx, entry->kind);
     if (obj) {
-        js_memcpy(obj, &entry->templateObject, entry->nbytes);
+        copyCachedToObject(obj, &entry->templateObject);
         Probes::createObject(cx, obj);
         return obj;
     }
@@ -1620,7 +1634,7 @@ NewObjectCache::newObjectFromHit(JSContext *cx, EntryIndex entry_)
 
     obj = js_NewGCObject(cx, entry->kind);
     if (obj) {
-        js_memcpy(obj, baseobj, nbytes);
+        copyCachedToObject(obj, baseobj);
         Probes::createObject(cx, obj);
         return obj;
     }
@@ -1953,9 +1967,18 @@ ObjectClassIs(JSObject &obj, ESClassValue classValue, JSContext *cx)
       case ESClass_Number: return obj.isNumber();
       case ESClass_String: return obj.isString();
       case ESClass_Boolean: return obj.isBoolean();
+      case ESClass_RegExp: return obj.isRegExp();
     }
     JS_NOT_REACHED("bad classValue");
     return false;
+}
+
+inline bool
+IsObjectWithClass(const Value &v, ESClassValue classValue, JSContext *cx)
+{
+    if (!v.isObject())
+        return false;
+    return ObjectClassIs(v.toObject(), classValue, cx);
 }
 
 static JS_ALWAYS_INLINE bool

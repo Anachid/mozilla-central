@@ -378,6 +378,7 @@ class ClonedBlockObject;
 class DeclEnvObject;
 class GlobalObject;
 class NestedScopeObject;
+class NewObjectCache;
 class NormalArgumentsObject;
 class NumberObject;
 class ScopeObject;
@@ -495,6 +496,7 @@ struct JSObject : js::gc::Cell
   private:
     friend struct js::Shape;
     friend struct js::GCMarker;
+    friend class  js::NewObjectCache;
 
     /*
      * Shape of the object, encodes the layout of the object's properties and
@@ -1464,6 +1466,10 @@ struct JSObject : js::gc::Cell
 
     static inline js::ThingRootKind rootKind() { return js::THING_ROOT_OBJECT; }
 
+#ifdef DEBUG
+    void dump();
+#endif
+
   private:
     static void staticAsserts() {
         /* Check alignment for any fixed slots allocated after the object. */
@@ -1664,6 +1670,7 @@ class NewObjectCache
   private:
     inline bool lookup(Class *clasp, gc::Cell *key, gc::AllocKind kind, EntryIndex *pentry);
     inline void fill(EntryIndex entry, Class *clasp, gc::Cell *key, gc::AllocKind kind, JSObject *obj);
+    static inline void copyCachedToObject(JSObject *dst, JSObject *src);
 };
 
 } /* namespace js */
