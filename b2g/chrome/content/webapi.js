@@ -56,9 +56,6 @@ XPCOMUtils.defineLazyGetter(Services, 'fm', function() {
 
     onLocationChange: function onLocationChange(progress, request,
                                                 locationURI, flags) {
-      if (locationURI.spec.indexOf('/apps/') == -1)
-        return;
-
       content.addEventListener('appwillopen', function(evt) {
         let appManager = content.wrappedJSObject.Gaia.AppManager;
         let topWindow = appManager.foregroundWindow.contentWindow;
@@ -321,6 +318,24 @@ function SettingsMessage(name, value) {
 
 // MozApps - Bug 709015
 var webapps = [
+  { // clock 
+    installOrigin: 'http://gaiamobile.org:8888',
+    origin: '../clock',
+    receipt: null,
+    installTime: 1323339869000,
+    manifest: {
+      'name': 'Clock',
+      'description': 'Gaia Clock',
+      'launch_path': '/clock.html',
+      'developer': {
+        'name': 'The Gaia Team',
+        'url': 'https://github.com/andreasgal/gaia'
+      },
+      'icons': {
+        '120': '/style/icons/Clock.png'
+      }
+    }
+  },
   { // browser
     installOrigin: 'http://gaiamobile.org:8888',
     origin: '../browser',

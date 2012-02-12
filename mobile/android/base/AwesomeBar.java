@@ -73,8 +73,10 @@ import android.widget.ListView;
 import android.widget.TabWidget;
 import android.widget.Toast;
 
+import java.net.URLEncoder;
 import java.util.Map;
 
+import org.mozilla.gecko.db.BrowserContract.Bookmarks;
 import org.mozilla.gecko.db.BrowserDB.URLColumns;
 import org.mozilla.gecko.db.BrowserDB;
 
@@ -93,12 +95,15 @@ public class AwesomeBar extends Activity implements GeckoEventListener {
     private AwesomeBarTabs mAwesomeTabs;
     private AwesomeBarEditText mText;
     private ImageButton mGoButton;
+    private ContentResolver mResolver;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
         Log.d(LOGTAG, "creating awesomebar");
+
+        mResolver = Tabs.getInstance().getContentResolver();
 
         setContentView(R.layout.awesomebar);
 
@@ -318,6 +323,15 @@ public class AwesomeBar extends Activity implements GeckoEventListener {
     }
 
     private void openUrlAndFinish(String url) {
+        int index = url.indexOf(' ');
+        if (index != -1) {
+            String keywordUrl = BrowserDB.getUrlForKeyword(mResolver, url.substring(0, index));
+            if (keywordUrl != null && keywordUrl.contains("%s")) {
+                String search = URLEncoder.encode(url.substring(index + 1));
+                url = keywordUrl.replace("%s", search);
+            }
+        }
+
         Intent resultIntent = new Intent();
         resultIntent.putExtra(URL_KEY, url);
         resultIntent.putExtra(TYPE_KEY, mType);
@@ -392,13 +406,29 @@ public class AwesomeBar extends Activity implements GeckoEventListener {
         Object selectedItem = null;
         String title = "";
 
-        if (view == (ListView)findViewById(R.id.history_list)) {
-            if (! (menuInfo instanceof ExpandableListView.ExpandableListContextMenuInfo)) {
+        if (list == findViewById(R.id.all_pages_list)) {
+            if (!(menuInfo instanceof AdapterView.AdapterContextMenuInfo)) {
+                Log.e(LOGTAG, "menuInfo is not AdapterContextMenuInfo");
+                return;
+            }
+
+            AdapterView.AdapterContextMenuInfo info = (AdapterView.AdapterContextMenuInfo) menuInfo;
+            selectedItem = list.getItemAtPosition(info.position);
+
+            if (!(selectedItem instanceof Cursor)) {
+                Log.e(LOGTAG, "item at " + info.position + " is not a Cursor");
+                return;
+            }
+
+            Cursor cursor = (Cursor) selectedItem;
+            title = cursor.getString(cursor.getColumnIndexOrThrow(URLColumns.TITLE));
+        } else {
+            if (!(menuInfo instanceof ExpandableListView.ExpandableListContextMenuInfo)) {
                 Log.e(LOGTAG, "menuInfo is not ExpandableListContextMenuInfo");
                 return;
             }
+
             ExpandableListView.ExpandableListContextMenuInfo info = (ExpandableListView.ExpandableListContextMenuInfo) menuInfo;
-            ExpandableListView exList = (ExpandableListView)list;
             int childPosition = ExpandableListView.getPackedPositionChild(info.packedPosition);
             int groupPosition = ExpandableListView.getPackedPositionGroup(info.packedPosition);
 
@@ -406,19 +436,18 @@ public class AwesomeBar extends Activity implements GeckoEventListener {
             if (groupPosition < 0 || childPosition < 0)
                 return;
 
+            ExpandableListView exList = (ExpandableListView) list;
             selectedItem = exList.getExpandableListAdapter().getChild(groupPosition, childPosition);
 
-            Map map = (Map)selectedItem;
-            title = (String)map.get(URLColumns.TITLE);
-        } else {
-            if (! (menuInfo instanceof AdapterView.AdapterContextMenuInfo)) {
-                Log.e(LOGTAG, "menuInfo is not AdapterContextMenuInfo");
-                return;
+            if (exList == findViewById(R.id.bookmarks_list)) {
+                // The bookmarks list is backed by a SimpleCursorTreeAdapter
+                Cursor cursor = (Cursor) selectedItem;
+                title = cursor.getString(cursor.getColumnIndexOrThrow(URLColumns.TITLE));
+            } else {
+                // The history list is backed by a SimpleExpandableListAdapter
+                Map map = (Map) selectedItem;
+                title = (String) map.get(URLColumns.TITLE);
             }
-            AdapterView.AdapterContextMenuInfo info = (AdapterView.AdapterContextMenuInfo) menuInfo;
-            selectedItem = list.getItemAtPosition(info.position);
-            Cursor cursor = (Cursor)selectedItem;
-            title = cursor.getString(cursor.getColumnIndexOrThrow(URLColumns.TITLE));
         }
 
         if (selectedItem == null || !((selectedItem instanceof Cursor) || (selectedItem instanceof Map))) {
@@ -431,7 +460,7 @@ public class AwesomeBar extends Activity implements GeckoEventListener {
         MenuInflater inflater = getMenuInflater();
         inflater.inflate(R.menu.awesomebar_contextmenu, menu);
         
-        if (view != (ListView)findViewById(R.id.bookmarks_list)) {
+        if (list != findViewById(R.id.bookmarks_list)) {
             MenuItem removeBookmarkItem = menu.findItem(R.id.remove_bookmark);
             removeBookmarkItem.setVisible(false);
         }
@@ -444,16 +473,19 @@ public class AwesomeBar extends Activity implements GeckoEventListener {
         if (mContextMenuSubject == null)
             return false;
 
-        String url = "";
+        final int id;
+        final String url;
         byte[] b = null;
         String title = "";
         if (mContextMenuSubject instanceof Cursor) {
             Cursor cursor = (Cursor)mContextMenuSubject;
+            id = cursor.getInt(cursor.getColumnIndexOrThrow(Bookmarks._ID));
             url = cursor.getString(cursor.getColumnIndexOrThrow(URLColumns.URL));
             b = cursor.getBlob(cursor.getColumnIndexOrThrow(URLColumns.FAVICON));
             title = cursor.getString(cursor.getColumnIndexOrThrow(URLColumns.TITLE));
         } else if (mContextMenuSubject instanceof Map) {
             Map map = (Map)mContextMenuSubject;
+            id = -1;
             url = (String)map.get(URLColumns.URL);
             b = (byte[]) map.get(URLColumns.FAVICON);
             title = (String)map.get(URLColumns.TITLE);
@@ -470,9 +502,19 @@ public class AwesomeBar extends Activity implements GeckoEventListener {
                 break;
             }
             case R.id.remove_bookmark: {
-                ContentResolver resolver = Tabs.getInstance().getContentResolver();
-                BrowserDB.removeBookmark(resolver, url);
-                Toast.makeText(this, R.string.bookmark_removed, Toast.LENGTH_SHORT).show();
+                GeckoAppShell.getHandler().post(new Runnable() {
+                    public void run() {
+                        BrowserDB.removeBookmark(mResolver, id);
+
+                        GeckoApp.mAppContext.mMainHandler.post(new Runnable() {
+                            public void run() {
+                                mAwesomeTabs.refreshBookmarks();
+                                Toast.makeText(AwesomeBar.this, R.string.bookmark_removed,
+                                        Toast.LENGTH_SHORT).show();
+                            }
+                        });
+                    }
+                });
                 break;
             }
             case R.id.add_to_launcher: {

@@ -354,6 +354,7 @@ extern Class BooleanClass;
 extern Class CallableObjectClass;
 extern Class DateClass;
 extern Class ErrorClass;
+extern Class ElementIteratorClass;
 extern Class GeneratorClass;
 extern Class IteratorClass;
 extern Class JSONClass;
@@ -363,6 +364,7 @@ extern Class NormalArgumentsObjectClass;
 extern Class ObjectClass;
 extern Class ProxyClass;
 extern Class RegExpClass;
+extern Class RegExpStaticsClass;
 extern Class SlowArrayClass;
 extern Class StopIterationClass;
 extern Class StringClass;
@@ -376,6 +378,7 @@ class BlockObject;
 class BooleanObject;
 class ClonedBlockObject;
 class DeclEnvObject;
+class ElementIteratorObject;
 class GlobalObject;
 class NestedScopeObject;
 class NewObjectCache;
@@ -672,11 +675,11 @@ struct JSObject : js::gc::Cell
     inline bool hasPropertyTable() const;
 
     inline size_t sizeOfThis() const;
-    inline size_t computedSizeOfIncludingThis() const;
+    inline size_t computedSizeOfThisSlotsElements() const;
 
-    /* mallocSizeOf can be NULL, in which case we compute the sizes analytically */
     inline void sizeOfExcludingThis(JSMallocSizeOfFun mallocSizeOf,
-                                    size_t *slotsSize, size_t *elementsSize) const;
+                                    size_t *slotsSize, size_t *elementsSize,
+                                    size_t *miscSize) const;
 
     inline size_t numFixedSlots() const;
 
@@ -994,7 +997,7 @@ struct JSObject : js::gc::Cell
 
     bool isSealed(JSContext *cx, bool *resultp) { return isSealedOrFrozen(cx, SEAL, resultp); }
     bool isFrozen(JSContext *cx, bool *resultp) { return isSealedOrFrozen(cx, FREEZE, resultp); }
-        
+
     /*
      * Primitive-specific getters and setters.
      */
@@ -1044,6 +1047,8 @@ struct JSObject : js::gc::Cell
     static inline size_t offsetOfFixedElements() {
         return sizeof(JSObject) + sizeof(js::ObjectElements);
     }
+
+    inline js::ElementIteratorObject *asElementIterator();
 
     /*
      * Array-specific getters and setters (for both dense and slow arrays).
@@ -1405,6 +1410,7 @@ struct JSObject : js::gc::Cell
     inline bool isArray() const;
     inline bool isDate() const;
     inline bool isDenseArray() const;
+    inline bool isElementIterator() const;
     inline bool isError() const;
     inline bool isFunction() const;
     inline bool isGenerator() const;
@@ -1416,6 +1422,7 @@ struct JSObject : js::gc::Cell
     inline bool isPrimitive() const;
     inline bool isProxy() const;
     inline bool isRegExp() const;
+    inline bool isRegExpStatics() const;
     inline bool isScope() const;
     inline bool isScript() const;
     inline bool isSlowArray() const;
@@ -1448,6 +1455,7 @@ struct JSObject : js::gc::Cell
     inline bool isCrossCompartmentWrapper() const;
 
     inline js::ArgumentsObject &asArguments();
+    inline const js::ArgumentsObject &asArguments() const;
     inline js::BlockObject &asBlock();
     inline js::BooleanObject &asBoolean();
     inline js::CallObject &asCall();
@@ -1547,13 +1555,9 @@ class ValueArray {
 
 /* For manipulating JSContext::sharpObjectMap. */
 #define SHARP_BIT       ((jsatomid) 1)
-#define BUSY_BIT        ((jsatomid) 2)
 #define SHARP_ID_SHIFT  2
 #define IS_SHARP(he)    (uintptr_t((he)->value) & SHARP_BIT)
 #define MAKE_SHARP(he)  ((he)->value = (void *) (uintptr_t((he)->value)|SHARP_BIT))
-#define IS_BUSY(he)     (uintptr_t((he)->value) & BUSY_BIT)
-#define MAKE_BUSY(he)   ((he)->value = (void *) (uintptr_t((he)->value)|BUSY_BIT))
-#define CLEAR_BUSY(he)  ((he)->value = (void *) (uintptr_t((he)->value)&~BUSY_BIT))
 
 extern JSHashEntry *
 js_EnterSharpObject(JSContext *cx, JSObject *obj, JSIdArray **idap, bool *alreadySeen);
@@ -1986,12 +1990,6 @@ js_PrintObjectSlotName(JSTracer *trc, char *buf, size_t bufsize);
 extern bool
 js_ClearNative(JSContext *cx, JSObject *obj);
 
-extern bool
-js_GetReservedSlot(JSContext *cx, JSObject *obj, uint32_t index, js::Value *vp);
-
-extern bool
-js_SetReservedSlot(JSContext *cx, JSObject *obj, uint32_t index, const js::Value &v);
-
 extern JSBool
 js_ReportGetterOnlyAssignment(JSContext *cx);
 
@@ -2001,6 +1999,17 @@ js_InferFlags(JSContext *cx, uintN defaultFlags);
 /* Object constructor native. Exposed only so the JIT can know its address. */
 JSBool
 js_Object(JSContext *cx, uintN argc, js::Value *vp);
+
+/*
+ * If protoKey is not JSProto_Null, then clasp is ignored. If protoKey is
+ * JSProto_Null, clasp must non-null.
+ *
+ * If protoKey is constant and scope is non-null, use GlobalObject's prototype
+ * methods instead.
+ */
+extern JS_FRIEND_API(JSBool)
+js_GetClassPrototype(JSContext *cx, JSObject *scope, JSProtoKey protoKey,
+                     JSObject **protop, js::Class *clasp = NULL);
 
 namespace js {
 

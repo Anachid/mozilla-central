@@ -70,7 +70,6 @@
 #include "jsexn.h"
 #include "jsfun.h"
 #include "jsgc.h"
-#include "jsgcchunk.h"
 #include "jsgcmark.h"
 #include "jsinterp.h"
 #include "jsiter.h"
@@ -88,6 +87,7 @@
 #endif
 
 #include "frontend/Parser.h"
+#include "gc/Memory.h"
 #include "methodjit/MethodJIT.h"
 #include "vm/Debugger.h"
 #include "vm/String.h"
@@ -432,6 +432,16 @@ FinalizeArenas(JSContext *cx, ArenaLists::ArenaList *al, AllocKind thingKind, bo
     }
 }
 
+static inline Chunk *
+AllocChunk() {
+    return static_cast<Chunk *>(MapAlignedPages(ChunkSize, ChunkSize));
+}
+
+static inline void
+FreeChunk(Chunk *p) {
+    UnmapPages(static_cast<void *>(p), ChunkSize);
+}
+
 #ifdef JS_THREADSAFE
 inline bool
 ChunkPool::wantBackgroundAllocation(JSRuntime *rt) const
@@ -698,7 +708,7 @@ Chunk::fetchNextDecommittedArena()
     decommittedArenas.unset(offset);
 
     Arena *arena = &arenas[offset];
-    CommitMemory(arena, ArenaSize);
+    MarkPagesInUse(arena, ArenaSize);
     arena->aheader.setAsNotAllocated();
 
     return &arena->aheader;
@@ -836,13 +846,10 @@ PickChunk(JSCompartment *comp)
 }
 
 JS_FRIEND_API(bool)
-IsAboutToBeFinalized(JSContext *cx, const Cell *thing)
+IsAboutToBeFinalized(const Cell *thing)
 {
-    JS_ASSERT(cx);
-
     JSCompartment *thingCompartment = reinterpret_cast<const Cell *>(thing)->compartment();
-    JSRuntime *rt = cx->runtime;
-    JS_ASSERT(rt == thingCompartment->rt);
+    JSRuntime *rt = thingCompartment->rt;
     if (rt->gcCurrentCompartment != NULL && rt->gcCurrentCompartment != thingCompartment)
         return false;
 
@@ -850,18 +857,10 @@ IsAboutToBeFinalized(JSContext *cx, const Cell *thing)
 }
 
 bool
-IsAboutToBeFinalized(JSContext *cx, const Value &v)
+IsAboutToBeFinalized(const Value &v)
 {
     JS_ASSERT(v.isMarkable());
-    return IsAboutToBeFinalized(cx, (Cell *)v.toGCThing());
-}
-
-JS_FRIEND_API(bool)
-js_GCThingIsMarked(void *thing, uintN color = BLACK)
-{
-    JS_ASSERT(thing);
-    AssertValidColor(thing, color);
-    return reinterpret_cast<Cell *>(thing)->isMarked(color);
+    return IsAboutToBeFinalized((Cell *)v.toGCThing());
 }
 
 /* Lifetime for type sets attached to scripts containing observed types. */
@@ -2283,7 +2282,7 @@ DecommitArenasFromAvailableList(JSRuntime *rt, Chunk **availableListHeadp)
                 Maybe<AutoUnlockGC> maybeUnlock;
                 if (!rt->gcRunning)
                     maybeUnlock.construct(rt);
-                ok = DecommitMemory(aheader->getArena(), ArenaSize);
+                ok = MarkPagesUnused(aheader->getArena(), ArenaSize);
             }
 
             if (ok) {
@@ -2759,10 +2758,10 @@ SweepPhase(JSContext *cx, GCMarker *gcmarker, JSGCInvocationKind gckind)
     /* Finalize unreachable (key,value) pairs in all weak maps. */
     WeakMapBase::sweepAll(gcmarker);
 
-    js_SweepAtomState(cx);
+    js_SweepAtomState(rt);
 
     /* Collect watch points associated with unreachable objects. */
-    WatchpointMap::sweepAll(cx);
+    WatchpointMap::sweepAll(rt);
 
     if (!rt->gcCurrentCompartment)
         Debugger::sweepAll(cx);
