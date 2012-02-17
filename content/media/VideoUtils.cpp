@@ -53,7 +53,6 @@ CheckedInt64 UsecsToFrames(PRInt64 aUsecs, PRUint32 aRate) {
   return (CheckedInt64(aUsecs) * aRate) / USECS_PER_S;
 }
 
-
 static PRInt32 ConditionDimension(float aValue)
 {
   // This will exclude NaNs and too-big values.
