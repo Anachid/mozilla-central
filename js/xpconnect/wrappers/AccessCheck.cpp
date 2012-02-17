@@ -52,7 +52,6 @@
 #include "WrapperFactory.h"
 
 #include "jsfriendapi.h"
-#include "jscntxt.h" // JSID_IS_ATOM, JSFlatString* -> JSString*
 
 using namespace mozilla;
 using namespace js;
@@ -91,12 +90,22 @@ AccessCheck::isSameOrigin(JSCompartment *a, JSCompartment *b)
 bool
 AccessCheck::isLocationObjectSameOrigin(JSContext *cx, JSObject *wrapper)
 {
+    // Location objects are parented to the outer window for which they
+    // were created. This gives us an easy way to determine whether our
+    // object is same origin with the current inner window:
+
+    // Grab the outer window...
     JSObject *obj = js::GetObjectParent(js::UnwrapObject(wrapper));
     if (!js::GetObjectClass(obj)->ext.innerObject) {
+        // ...which might be wrapped in a security wrapper.
         obj = js::UnwrapObject(obj);
         JS_ASSERT(js::GetObjectClass(obj)->ext.innerObject);
     }
+
+    // Now innerize it to find the *current* inner window for our outer.
     obj = JS_ObjectToInnerObject(cx, obj);
+
+    // Which lets us compare the current compartment against the old one.
     return obj &&
            (isSameOrigin(js::GetObjectCompartment(wrapper),
                          js::GetObjectCompartment(obj)) ||
@@ -136,7 +145,8 @@ static bool
 IsPermitted(const char *name, JSFlatString *prop, bool set)
 {
     size_t propLength;
-    const jschar *propChars = JS_GetInternedStringCharsAndLength(prop, &propLength);
+    const jschar *propChars =
+        JS_GetInternedStringCharsAndLength(JS_FORGET_STRING_FLATNESS(prop), &propLength);
     if (!propLength)
         return false;
     switch (name[0]) {
@@ -196,7 +206,7 @@ IsFrameId(JSContext *cx, JSObject *obj, jsid id)
 
     if (JSID_IS_INT(id)) {
         col->Item(JSID_TO_INT(id), getter_AddRefs(domwin));
-    } else if (JSID_IS_ATOM(id)) {
+    } else if (JSID_IS_STRING(id)) {
         nsAutoString str(JS_GetInternedStringChars(JSID_TO_STRING(id)));
         col->NamedItem(str, getter_AddRefs(domwin));
     } else {
@@ -303,7 +313,7 @@ AccessCheck::isCrossOriginAccessPermitted(JSContext *cx, JSObject *wrapper, jsid
     else
         name = clasp->name;
 
-    if (JSID_IS_ATOM(id)) {
+    if (JSID_IS_STRING(id)) {
         if (IsPermitted(name, JSID_TO_FLAT_STRING(id), act == Wrapper::SET))
             return true;
     }
@@ -384,7 +394,7 @@ AccessCheck::isScriptAccessOnly(JSContext *cx, JSObject *wrapper)
     JS_ASSERT(js::IsWrapper(wrapper));
 
     uintN flags;
-    JSObject *obj = js::UnwrapObject(wrapper, &flags);
+    JSObject *obj = js::UnwrapObject(wrapper, true, &flags);
 
     // If the wrapper indicates script-only access, we are done.
     if (flags & WrapperFactory::SCRIPT_ACCESS_ONLY_FLAG) {
@@ -496,7 +506,7 @@ ExposedPropertiesOnly::check(JSContext *cx, JSObject *wrapper, jsid id, Wrapper:
     // Always permit access to "length" and indexed properties of arrays.
     if (JS_IsArrayObject(cx, wrappedObject) &&
         ((JSID_IS_INT(id) && JSID_TO_INT(id) >= 0) ||
-         (JSID_IS_ATOM(id) && JS_FlatStringEqualsAscii(JSID_TO_FLAT_STRING(id), "length")))) {
+         (JSID_IS_STRING(id) && JS_FlatStringEqualsAscii(JSID_TO_FLAT_STRING(id), "length")))) {
         perm = PermitPropertyAccess;
         return true; // Allow
     }

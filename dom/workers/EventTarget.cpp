@@ -39,8 +39,13 @@
 #include "EventTarget.h"
 
 #include "jsapi.h"
-#include "jscntxt.h"
+#include "jsfriendapi.h"
 #include "nsTraceRefcnt.h"
+
+// All the EventTarget subclasses have to be included here.
+#include "Worker.h"
+#include "WorkerScope.h"
+#include "XMLHttpRequest.h"
 
 #include "WorkerInlines.h"
 
@@ -64,10 +69,25 @@ DECL_EVENTTARGET_CLASS(gMainThreadClass, "WorkerEventTarget")
 #undef DECL_EVENTTARGET_CLASS
 
 inline
-EventTarget*
-GetPrivate(JSContext* aCx, JSObject* aObj)
+bool
+EnsureObjectIsEventTarget(JSContext* aCx, JSObject* aObj, char* aFunctionName)
 {
-  return GetJSPrivateSafeish<EventTarget>(aCx, aObj);
+  JSClass* classPtr = JS_GetClass(aObj);
+  if (ClassIsWorker(classPtr) || ClassIsWorkerGlobalScope(classPtr) ||
+      ClassIsXMLHttpRequest(classPtr)) {
+    return true;
+  }
+
+  JS_ReportErrorNumber(aCx, js_GetErrorMessage, NULL, JSMSG_INCOMPATIBLE_PROTO,
+                       "EventTarget", aFunctionName, classPtr->name);
+  return false;
+}
+
+inline
+EventTarget*
+GetPrivate(JSObject* aObj)
+{
+  return GetJSPrivateSafeish<EventTarget>(aObj);
 }
 
 JSBool
@@ -129,9 +149,9 @@ EventTarget::SetEventListenerOnEventTarget(JSContext* aCx, const char* aType,
 
 // static
 EventTarget*
-EventTarget::FromJSObject(JSContext* aCx, JSObject* aObj)
+EventTarget::FromJSObject(JSObject* aObj)
 {
-  return GetPrivate(aCx, aObj);
+  return GetPrivate(aObj);
 }
 
 // static
@@ -143,7 +163,11 @@ EventTarget::AddEventListener(JSContext* aCx, uintN aArgc, jsval* aVp)
     return true;
   }
 
-  EventTarget* self = GetPrivate(aCx, obj);
+  if (!EnsureObjectIsEventTarget(aCx, obj, "AddEventListener")) {
+    return false;
+  }
+
+  EventTarget* self = GetPrivate(obj);
   if (!self) {
     return true;
   }
@@ -174,7 +198,11 @@ EventTarget::RemoveEventListener(JSContext* aCx, uintN aArgc, jsval* aVp)
     return true;
   }
 
-  EventTarget* self = GetPrivate(aCx, obj);
+  if (!EnsureObjectIsEventTarget(aCx, obj, "RemoveEventListener")) {
+    return false;
+  }
+
+  EventTarget* self = GetPrivate(obj);
   if (!self) {
     return true;
   }
@@ -205,7 +233,11 @@ EventTarget::DispatchEvent(JSContext* aCx, uintN aArgc, jsval* aVp)
     return true;
   }
 
-  EventTarget* self = GetPrivate(aCx, obj);
+  if (!EnsureObjectIsEventTarget(aCx, obj, "DispatchEvent")) {
+    return false;
+  }
+
+  EventTarget* self = GetPrivate(obj);
   if (!self) {
     return true;
   }

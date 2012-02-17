@@ -83,7 +83,7 @@ GetFunctionProxyConstruct(JSObject *proxy)
 static bool
 OperationInProgress(JSContext *cx, JSObject *proxy)
 {
-    PendingProxyOperation *op = JS_THREAD_DATA(cx)->pendingProxyOperation;
+    PendingProxyOperation *op = cx->runtime->pendingProxyOperation;
     while (op) {
         if (op->object == proxy)
             return true;
@@ -180,7 +180,10 @@ ProxyHandler::set(JSContext *cx, JSObject *proxy, JSObject *receiver, jsid id, b
         if (desc.attrs & JSPROP_READONLY)
             return true;
         if (!desc.setter) {
-            desc.setter = JS_StrictPropertyStub;
+            // Be wary of the odd explicit undefined setter case possible through
+            // Object.defineProperty.
+            if (!(desc.attrs & JSPROP_SETTER))
+                desc.setter = JS_StrictPropertyStub;
         } else if ((desc.attrs & JSPROP_SETTER) || desc.setter != JS_StrictPropertyStub) {
             if (!CallSetter(cx, receiver, id, desc.setter, desc.attrs, desc.shortid, strict, vp))
                 return false;
@@ -189,8 +192,11 @@ ProxyHandler::set(JSContext *cx, JSObject *proxy, JSObject *receiver, jsid id, b
             if (desc.attrs & JSPROP_SHARED)
                 return true;
         }
-        if (!desc.getter)
-            desc.getter = JS_PropertyStub;
+        if (!desc.getter) {
+            // Same as above for the null setter case.
+            if (!(desc.attrs & JSPROP_GETTER))
+                desc.getter = JS_PropertyStub;
+        }
         desc.value = *vp;
         return defineProperty(cx, receiver, id, &desc);
     }
@@ -200,7 +206,10 @@ ProxyHandler::set(JSContext *cx, JSObject *proxy, JSObject *receiver, jsid id, b
         if (desc.attrs & JSPROP_READONLY)
             return true;
         if (!desc.setter) {
-            desc.setter = JS_StrictPropertyStub;
+            // Be wary of the odd explicit undefined setter case possible through
+            // Object.defineProperty.
+            if (!(desc.attrs & JSPROP_SETTER))
+                desc.setter = JS_StrictPropertyStub;
         } else if ((desc.attrs & JSPROP_SETTER) || desc.setter != JS_StrictPropertyStub) {
             if (!CallSetter(cx, receiver, id, desc.setter, desc.attrs, desc.shortid, strict, vp))
                 return false;
@@ -209,8 +218,11 @@ ProxyHandler::set(JSContext *cx, JSObject *proxy, JSObject *receiver, jsid id, b
             if (desc.attrs & JSPROP_SHARED)
                 return true;
         }
-        if (!desc.getter)
-            desc.getter = JS_PropertyStub;
+        if (!desc.getter) {
+            // Same as above for the null setter case.
+            if (!(desc.attrs & JSPROP_GETTER))
+                desc.getter = JS_PropertyStub;
+        }
         return defineProperty(cx, receiver, id, &desc);
     }
 
@@ -289,10 +301,24 @@ ProxyHandler::fun_toString(JSContext *cx, JSObject *proxy, uintN indent)
     return fun_toStringHelper(cx, &fval.toObject(), indent);
 }
 
+RegExpShared *
+ProxyHandler::regexp_toShared(JSContext *cx, JSObject *proxy)
+{
+    JS_NOT_REACHED("This should have been a wrapped regexp");
+    return (RegExpShared *)NULL;
+}
+
 bool
 ProxyHandler::defaultValue(JSContext *cx, JSObject *proxy, JSType hint, Value *vp)
 {
     return DefaultValue(cx, proxy, hint, vp);
+}
+
+bool
+ProxyHandler::iteratorNext(JSContext *cx, JSObject *proxy, Value *vp)
+{
+    vp->setMagic(JS_NO_ITER_VALUE);
+    return true;
 }
 
 bool
@@ -710,18 +736,18 @@ ScriptedProxyHandler::iterate(JSContext *cx, JSObject *proxy, uintN flags, Value
 ScriptedProxyHandler ScriptedProxyHandler::singleton;
 
 class AutoPendingProxyOperation {
-    ThreadData              *data;
+    JSRuntime               *rt;
     PendingProxyOperation   op;
   public:
-    AutoPendingProxyOperation(JSContext *cx, JSObject *proxy) : data(JS_THREAD_DATA(cx)) {
-        op.next = data->pendingProxyOperation;
+    AutoPendingProxyOperation(JSContext *cx, JSObject *proxy) : rt(cx->runtime) {
+        op.next = rt->pendingProxyOperation;
         op.object = proxy;
-        data->pendingProxyOperation = &op;
+        rt->pendingProxyOperation = &op;
     }
 
     ~AutoPendingProxyOperation() {
-        JS_ASSERT(data->pendingProxyOperation == &op);
-        data->pendingProxyOperation = op.next;
+        JS_ASSERT(rt->pendingProxyOperation == &op);
+        rt->pendingProxyOperation = op.next;
     }
 };
 
@@ -934,12 +960,28 @@ Proxy::fun_toString(JSContext *cx, JSObject *proxy, uintN indent)
     return GetProxyHandler(proxy)->fun_toString(cx, proxy, indent);
 }
 
+RegExpShared *
+Proxy::regexp_toShared(JSContext *cx, JSObject *proxy)
+{
+    JS_CHECK_RECURSION(cx, return NULL);
+    AutoPendingProxyOperation pending(cx, proxy);
+    return GetProxyHandler(proxy)->regexp_toShared(cx, proxy);
+}
+
 bool
 Proxy::defaultValue(JSContext *cx, JSObject *proxy, JSType hint, Value *vp)
 {
     JS_CHECK_RECURSION(cx, return NULL);
     AutoPendingProxyOperation pending(cx, proxy);
     return GetProxyHandler(proxy)->defaultValue(cx, proxy, hint, vp);
+}
+
+bool
+Proxy::iteratorNext(JSContext *cx, JSObject *proxy, Value *vp)
+{
+    JS_CHECK_RECURSION(cx, return NULL);
+    AutoPendingProxyOperation pending(cx, proxy);
+    return GetProxyHandler(proxy)->iteratorNext(cx, proxy, vp);
 }
 
 static JSObject *
@@ -1448,7 +1490,7 @@ JS_FRIEND_DATA(Class) js::FunctionProxyClass = {
         proxy_DeleteSpecial,
         NULL,                /* enumerate       */
         proxy_TypeOf,
-        NULL,                /* fix             */
+        proxy_Fix,           /* fix             */
         NULL,                /* thisObject      */
         NULL,                /* clear           */
     }

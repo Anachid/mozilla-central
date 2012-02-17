@@ -195,7 +195,7 @@ GetGCKindSlots(AllocKind thingKind, Class *clasp)
 }
 
 static inline void
-GCPoke(JSContext *cx, Value oldval)
+GCPoke(JSRuntime *rt, Value oldval)
 {
     /*
      * Since we're forcing a GC from JS_GC anyway, don't bother wasting cycles
@@ -203,15 +203,15 @@ GCPoke(JSContext *cx, Value oldval)
      * ignored", etc.
      */
 #if 1
-    cx->runtime->gcPoke = JS_TRUE;
+    rt->gcPoke = true;
 #else
-    cx->runtime->gcPoke = oldval.isGCThing();
+    rt->gcPoke = oldval.isGCThing();
 #endif
 
 #ifdef JS_GC_ZEAL
     /* Schedule a GC to happen "soon" after a GC poke. */
-    if (cx->runtime->gcZeal() >= js::gc::ZealPokeThreshold)
-        cx->runtime->gcNextScheduled = 1;
+    if (rt->gcZeal() >= js::gc::ZealPokeThreshold)
+        rt->gcNextScheduled = 1;
 #endif
 }
 
@@ -346,7 +346,7 @@ class CellIter: public CellIterImpl
             lists->copyFreeListToArena(kind);
         }
 #ifdef DEBUG
-        counter = &JS_THREAD_DATA(cx)->noGCOrAllocationCheck;
+        counter = &cx->runtime->noGCOrAllocationCheck;
         ++*counter;
 #endif
         init(comp, kind);
@@ -384,7 +384,7 @@ NewGCThing(JSContext *cx, js::gc::AllocKind kind, size_t thingSize)
                  kind == js::gc::FINALIZE_STRING || kind == js::gc::FINALIZE_SHORT_STRING);
 #endif
     JS_ASSERT(!cx->runtime->gcRunning);
-    JS_ASSERT(!JS_THREAD_DATA(cx)->noGCOrAllocationCheck);
+    JS_ASSERT(!cx->runtime->noGCOrAllocationCheck);
 
 #ifdef JS_GC_ZEAL
     if (cx->runtime->needZealousGC())
@@ -411,7 +411,7 @@ TryNewGCThing(JSContext *cx, js::gc::AllocKind kind, size_t thingSize)
                  kind == js::gc::FINALIZE_STRING || kind == js::gc::FINALIZE_SHORT_STRING);
 #endif
     JS_ASSERT(!cx->runtime->gcRunning);
-    JS_ASSERT(!JS_THREAD_DATA(cx)->noGCOrAllocationCheck);
+    JS_ASSERT(!cx->runtime->noGCOrAllocationCheck);
 
 #ifdef JS_GC_ZEAL
     if (cx->runtime->needZealousGC())

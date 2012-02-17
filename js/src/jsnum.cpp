@@ -55,7 +55,6 @@
 #include "mozilla/RangedPtr.h"
 
 #include "jstypes.h"
-#include "jsstdint.h"
 #include "jsutil.h"
 #include "jsapi.h"
 #include "jsatom.h"
@@ -108,7 +107,7 @@ ComputeAccurateDecimalInteger(JSContext *cx, const jschar *start, const jschar *
 
     char *estr;
     int err = 0;
-    *dp = js_strtod_harder(JS_THREAD_DATA(cx)->dtoaState, cstr, &estr, &err);
+    *dp = js_strtod_harder(cx->runtime->dtoaState, cstr, &estr, &err);
     if (err == JS_DTOA_ENOMEM) {
         JS_ReportOutOfMemory(cx);
         cx->free_(cstr);
@@ -736,7 +735,7 @@ num_toLocaleString(JSContext *cx, uintN argc, Value *vp)
         strcpy(tmpDest, rt->thousandsSeparator);
         tmpDest += thousandsLength;
         JS_ASSERT(tmpDest - buf + *tmpGroup <= buflen);
-        memcpy(tmpDest, tmpSrc, *tmpGroup);
+        js_memcpy(tmpDest, tmpSrc, *tmpGroup);
         tmpDest += *tmpGroup;
         tmpSrc += *tmpGroup;
         if (--nrepeat < 0)
@@ -816,7 +815,7 @@ num_to(JSContext *cx, Native native, JSDToStrMode zeroArgMode, JSDToStrMode oneA
         }
     }
 
-    numStr = js_dtostr(JS_THREAD_DATA(cx)->dtoaState, buf, sizeof buf,
+    numStr = js_dtostr(cx->runtime->dtoaState, buf, sizeof buf,
                        oneArgMode, (jsint)precision + precisionOffset, d);
     if (!numStr) {
         JS_ReportOutOfMemory(cx);
@@ -978,15 +977,15 @@ InitRuntimeNumberState(JSRuntime *rt)
     if (!storage)
         return false;
 
-    memcpy(storage, thousandsSeparator, thousandsSeparatorSize);
+    js_memcpy(storage, thousandsSeparator, thousandsSeparatorSize);
     rt->thousandsSeparator = storage;
     storage += thousandsSeparatorSize;
 
-    memcpy(storage, decimalPoint, decimalPointSize);
+    js_memcpy(storage, decimalPoint, decimalPointSize);
     rt->decimalSeparator = storage;
     storage += decimalPointSize;
 
-    memcpy(storage, grouping, groupingSize);
+    js_memcpy(storage, grouping, groupingSize);
     rt->numGrouping = grouping;
     return true;
 }
@@ -1087,10 +1086,10 @@ FracNumberToCString(JSContext *cx, ToCStringBuf *cbuf, jsdouble d, jsint base = 
          */
         numStr = v8::internal::DoubleToCString(d, cbuf->sbuf, cbuf->sbufSize);
         if (!numStr)
-            numStr = js_dtostr(JS_THREAD_DATA(cx)->dtoaState, cbuf->sbuf, cbuf->sbufSize,
+            numStr = js_dtostr(cx->runtime->dtoaState, cbuf->sbuf, cbuf->sbufSize,
                                DTOSTR_STANDARD, 0, d);
     } else {
-        numStr = cbuf->dbuf = js_dtobasestr(JS_THREAD_DATA(cx)->dtoaState, base, d);
+        numStr = cbuf->dbuf = js_dtobasestr(cx->runtime->dtoaState, base, d);
     }
     return numStr;
 }
@@ -1298,35 +1297,6 @@ ToUint32Slow(JSContext *cx, const Value &v, uint32_t *out)
 
 }  /* namespace js */
 
-uint32_t
-js_DoubleToECMAUint32(jsdouble d)
-{
-    int32_t i;
-    JSBool neg;
-    jsdouble two32;
-
-    if (!JSDOUBLE_IS_FINITE(d))
-        return 0;
-
-    /*
-     * We check whether d fits int32, not uint32, as all but the ">>>" bit
-     * manipulation bytecode stores the result as int, not uint. When the
-     * result does not fit int Value, it will be stored as a negative double.
-     */
-    i = (int32_t) d;
-    if ((jsdouble) i == d)
-        return (int32_t)i;
-
-    neg = (d < 0);
-    d = floor(neg ? -d : d);
-    d = neg ? -d : d;
-
-    two32 = 4294967296.0;
-    d = fmod(d, two32);
-
-    return (uint32_t) (d >= 0 ? d : d + two32);
-}
-
 namespace js {
 
 bool
@@ -1421,7 +1391,7 @@ js_strtod(JSContext *cx, const jschar *s, const jschar *send,
         estr = istr + 8;
     } else {
         int err;
-        d = js_strtod_harder(JS_THREAD_DATA(cx)->dtoaState, cstr, &estr, &err);
+        d = js_strtod_harder(cx->runtime->dtoaState, cstr, &estr, &err);
         if (d == HUGE_VAL)
             d = js_PositiveInfinity;
         else if (d == -HUGE_VAL)

@@ -60,6 +60,60 @@ namespace {
 using namespace base;
 using namespace mozilla;
 
+template<class EntryType>
+class AutoHashtable : public nsTHashtable<EntryType>
+{
+public:
+  AutoHashtable(PRUint32 initSize = PL_DHASH_MIN_SIZE);
+  ~AutoHashtable();
+  typedef bool (*ReflectEntryFunc)(EntryType *entry, JSContext *cx, JSObject *obj);
+  bool ReflectHashtable(ReflectEntryFunc entryFunc, JSContext *cx, JSObject *obj);
+private:
+  struct EnumeratorArgs {
+    JSContext *cx;
+    JSObject *obj;
+    ReflectEntryFunc entryFunc;
+  };
+  static PLDHashOperator ReflectEntryStub(EntryType *entry, void *arg);
+};
+
+template<class EntryType>
+AutoHashtable<EntryType>::AutoHashtable(PRUint32 initSize)
+{
+  this->Init(initSize);
+}
+
+template<class EntryType>
+AutoHashtable<EntryType>::~AutoHashtable()
+{
+  this->Clear();
+}
+
+template<typename EntryType>
+PLDHashOperator
+AutoHashtable<EntryType>::ReflectEntryStub(EntryType *entry, void *arg)
+{
+  EnumeratorArgs *args = static_cast<EnumeratorArgs *>(arg);
+  if (!args->entryFunc(entry, args->cx, args->obj)) {
+    return PL_DHASH_STOP;
+  }
+  return PL_DHASH_NEXT;
+}
+
+/**
+ * Reflect the individual entries of table into JS, usually by defining
+ * some property and value of obj.  entryFunc is called for each entry.
+ */
+template<typename EntryType>
+bool
+AutoHashtable<EntryType>::ReflectHashtable(ReflectEntryFunc entryFunc,
+                                           JSContext *cx, JSObject *obj)
+{
+  EnumeratorArgs args = { cx, obj, entryFunc };
+  PRUint32 num = this->EnumerateEntries(ReflectEntryStub, static_cast<void*>(&args));
+  return num == this->Count();
+}
+
 class TelemetryImpl : public nsITelemetry
 {
   NS_DECL_ISUPPORTS
@@ -75,6 +129,7 @@ public:
   static void RecordSlowStatement(const nsACString &statement,
                                   const nsACString &dbName,
                                   PRUint32 delay);
+  static nsresult GetHistogramEnumId(const char *name, Telemetry::ID *id);
   struct StmtStats {
     PRUint32 hitCount;
     PRUint32 totalTime;
@@ -82,18 +137,25 @@ public:
   typedef nsBaseHashtableET<nsCStringHashKey, StmtStats> SlowSQLEntryType;
 
 private:
+  static bool StatementReflector(SlowSQLEntryType *entry, JSContext *cx,
+                                 JSObject *obj);
   bool AddSQLInfo(JSContext *cx, JSObject *rootObj, bool mainThread);
 
   // Like GetHistogramById, but returns the underlying C++ object, not the JS one.
   nsresult GetHistogramByName(const nsACString &name, Histogram **ret);
-  // This is used for speedy JS string->Telemetry::ID conversions
+  bool ShouldReflectHistogram(Histogram *h);
+  void IdentifyCorruptHistograms(StatisticsRecorder::Histograms &hs);
+  typedef StatisticsRecorder::Histograms::iterator HistogramIterator;
+  // This is used for speedy string->Telemetry::ID conversions
   typedef nsBaseHashtableET<nsCharPtrHashKey, Telemetry::ID> CharPtrEntryType;
-  typedef nsTHashtable<CharPtrEntryType> HistogramMapType;
+  typedef AutoHashtable<CharPtrEntryType> HistogramMapType;
   HistogramMapType mHistogramMap;
   bool mCanRecord;
   static TelemetryImpl *sTelemetry;
-  nsTHashtable<SlowSQLEntryType> mSlowSQLOnMainThread;
-  nsTHashtable<SlowSQLEntryType> mSlowSQLOnOtherThread;
+  AutoHashtable<SlowSQLEntryType> mSlowSQLOnMainThread;
+  AutoHashtable<SlowSQLEntryType> mSlowSQLOnOtherThread;
+  // This gets marked immutable in debug builds, so we can't use
+  // AutoHashtable here.
   nsTHashtable<nsCStringHashKey> mTrackedDBs;
   Mutex mHashMutex;
 };
@@ -133,6 +195,7 @@ const TelemetryHistogram gHistograms[] = {
 
 #undef HISTOGRAM
 };
+bool gCorruptHistograms[Telemetry::HistogramCount];
 
 bool
 TelemetryHistogramType(Histogram *h, PRUint32 *result)
@@ -215,11 +278,23 @@ FillRanges(JSContext *cx, JSObject *array, Histogram *h)
   return true;
 }
 
-JSBool
+enum reflectStatus {
+  REFLECT_OK,
+  REFLECT_CORRUPT,
+  REFLECT_FAILURE
+};
+
+enum reflectStatus
 ReflectHistogramSnapshot(JSContext *cx, JSObject *obj, Histogram *h)
 {
   Histogram::SampleSet ss;
   h->SnapshotSample(&ss);
+
+  // We don't want to reflect corrupt histograms.
+  if (h->FindCorruption(ss) != Histogram::NO_INCONSISTENCIES) {
+    return REFLECT_CORRUPT;
+  }
+
   JSObject *counts_array;
   JSObject *rarray;
   const size_t count = h->bucket_count();
@@ -233,14 +308,14 @@ ReflectHistogramSnapshot(JSContext *cx, JSObject *obj, Histogram *h)
         && (counts_array = JS_NewArrayObject(cx, count, NULL))
         && JS_DefineProperty(cx, obj, "counts", OBJECT_TO_JSVAL(counts_array), NULL, NULL, JSPROP_ENUMERATE)
         )) {
-    return JS_FALSE;
+    return REFLECT_FAILURE;
   }
   for (size_t i = 0; i < count; i++) {
     if (!JS_DefineElement(cx, counts_array, i, INT_TO_JSVAL(ss.counts(i)), NULL, NULL, JSPROP_ENUMERATE)) {
-      return JS_FALSE;
+      return REFLECT_FAILURE;
     }
   }
-  return JS_TRUE;
+  return REFLECT_OK;
 }
 
 JSBool
@@ -269,7 +344,7 @@ JSHistogram_Add(JSContext *cx, uintN argc, jsval *vp)
       return JS_FALSE;
     }
 
-    Histogram *h = static_cast<Histogram*>(JS_GetPrivate(cx, obj));
+    Histogram *h = static_cast<Histogram*>(JS_GetPrivate(obj));
     if (h->histogram_type() == Histogram::BOOLEAN_HISTOGRAM)
       h->Add(!!value);
     else
@@ -286,12 +361,24 @@ JSHistogram_Snapshot(JSContext *cx, uintN argc, jsval *vp)
     return JS_FALSE;
   }
 
-  Histogram *h = static_cast<Histogram*>(JS_GetPrivate(cx, obj));
+  Histogram *h = static_cast<Histogram*>(JS_GetPrivate(obj));
   JSObject *snapshot = JS_NewObject(cx, NULL, NULL, NULL);
   if (!snapshot)
     return JS_FALSE;
-  JS_SET_RVAL(cx, vp, OBJECT_TO_JSVAL(snapshot));
-  return ReflectHistogramSnapshot(cx, snapshot, h);
+
+  switch (ReflectHistogramSnapshot(cx, snapshot, h)) {
+  case REFLECT_FAILURE:
+    return JS_FALSE;
+  case REFLECT_CORRUPT:
+    JS_ReportError(cx, "Histogram is corrupt");
+    return JS_FALSE;
+  case REFLECT_OK:
+    JS_SET_RVAL(cx, vp, OBJECT_TO_JSVAL(snapshot));
+    return JS_TRUE;
+  default:
+    MOZ_NOT_REACHED("unhandled reflection status");
+    return JS_FALSE;
+  }
 }
 
 nsresult 
@@ -309,12 +396,13 @@ WrapAndReturnHistogram(Histogram *h, JSContext *cx, jsval *ret)
   if (!obj)
     return NS_ERROR_FAILURE;
   *ret = OBJECT_TO_JSVAL(obj);
-  return (JS_SetPrivate(cx, obj, h)
-          && JS_DefineFunction (cx, obj, "add", JSHistogram_Add, 1, 0)
+  JS_SetPrivate(obj, h);
+  return (JS_DefineFunction (cx, obj, "add", JSHistogram_Add, 1, 0)
           && JS_DefineFunction (cx, obj, "snapshot", JSHistogram_Snapshot, 1, 0)) ? NS_OK : NS_ERROR_FAILURE;
 }
 
 TelemetryImpl::TelemetryImpl():
+mHistogramMap(Telemetry::HistogramCount),
 mCanRecord(XRE_GetProcessType() == GeckoProcessType_Default),
 mHashMutex("Telemetry::mHashMutex")
 {
@@ -335,16 +423,9 @@ mHashMutex("Telemetry::mHashMutex")
   // Mark immutable to prevent asserts on simultaneous access from multiple threads
   mTrackedDBs.MarkImmutable();
 #endif
-
-  mSlowSQLOnMainThread.Init();
-  mSlowSQLOnOtherThread.Init();
-  mHistogramMap.Init(Telemetry::HistogramCount);
 }
 
 TelemetryImpl::~TelemetryImpl() {
-  mSlowSQLOnMainThread.Clear();
-  mSlowSQLOnOtherThread.Clear();
-  mHistogramMap.Clear();
 }
 
 NS_IMETHODIMP
@@ -358,33 +439,22 @@ TelemetryImpl::NewHistogram(const nsACString &name, PRUint32 min, PRUint32 max, 
   return WrapAndReturnHistogram(h, cx, ret);
 }
 
-struct EnumeratorArgs {
-  JSContext *cx;
-  JSObject *statsObj;
-};
-
-PLDHashOperator
-StatementEnumerator(TelemetryImpl::SlowSQLEntryType *entry, void *arg)
+bool
+TelemetryImpl::StatementReflector(SlowSQLEntryType *entry, JSContext *cx,
+                                  JSObject *obj)
 {
-  EnumeratorArgs *args = static_cast<EnumeratorArgs *>(arg);
   const nsACString &sql = entry->GetKey();
   jsval hitCount = UINT_TO_JSVAL(entry->mData.hitCount);
   jsval totalTime = UINT_TO_JSVAL(entry->mData.totalTime);
 
-  JSObject *arrayObj = JS_NewArrayObject(args->cx, 2, nsnull);
-  if (!arrayObj ||
-      !JS_SetElement(args->cx, arrayObj, 0, &hitCount) ||
-      !JS_SetElement(args->cx, arrayObj, 1, &totalTime))
-    return PL_DHASH_STOP;
-
-  JSBool success = JS_DefineProperty(args->cx, args->statsObj,
-                                     sql.BeginReading(),
-                                     OBJECT_TO_JSVAL(arrayObj),
-                                     NULL, NULL, JSPROP_ENUMERATE);
-  if (!success)
-    return PL_DHASH_STOP;
-
-  return PL_DHASH_NEXT;
+  JSObject *arrayObj = JS_NewArrayObject(cx, 2, nsnull);
+  return (arrayObj
+          && JS_SetElement(cx, arrayObj, 0, &hitCount)
+          && JS_SetElement(cx, arrayObj, 1, &totalTime)
+          && JS_DefineProperty(cx, obj,
+                               sql.BeginReading(),
+                               OBJECT_TO_JSVAL(arrayObj),
+                               NULL, NULL, JSPROP_ENUMERATE));
 }
 
 bool
@@ -401,39 +471,51 @@ TelemetryImpl::AddSQLInfo(JSContext *cx, JSObject *rootObj, bool mainThread)
   if (!ok)
     return false;
 
-  EnumeratorArgs args = { cx, statsObj };
-  nsTHashtable<SlowSQLEntryType> *sqlMap;
-  sqlMap = (mainThread ? &mSlowSQLOnMainThread : &mSlowSQLOnOtherThread);
-  PRUint32 num = sqlMap->EnumerateEntries(StatementEnumerator,
-                                          static_cast<void*>(&args));
-  if (num != sqlMap->Count())
-    return false;
-
-  return true;
+  AutoHashtable<SlowSQLEntryType> &sqlMap = (mainThread
+                                             ? mSlowSQLOnMainThread
+                                             : mSlowSQLOnOtherThread);
+  return sqlMap.ReflectHashtable(StatementReflector, cx, statsObj);
 }
 
-
 nsresult
-TelemetryImpl::GetHistogramByName(const nsACString &name, Histogram **ret)
+TelemetryImpl::GetHistogramEnumId(const char *name, Telemetry::ID *id)
 {
+  if (!sTelemetry) {
+    return NS_ERROR_FAILURE;
+  }
+
   // Cache names
   // Note the histogram names are statically allocated
-  if (!mHistogramMap.Count()) {
+  TelemetryImpl::HistogramMapType *map = &sTelemetry->mHistogramMap;
+  if (!map->Count()) {
     for (PRUint32 i = 0; i < Telemetry::HistogramCount; i++) {
-      CharPtrEntryType *entry = mHistogramMap.PutEntry(gHistograms[i].id);
+      CharPtrEntryType *entry = map->PutEntry(gHistograms[i].id);
       if (NS_UNLIKELY(!entry)) {
-        mHistogramMap.Clear();
+        map->Clear();
         return NS_ERROR_OUT_OF_MEMORY;
       }
       entry->mData = (Telemetry::ID) i;
     }
   }
 
-  CharPtrEntryType *entry = mHistogramMap.GetEntry(PromiseFlatCString(name).get());
-  if (!entry)
-    return NS_ERROR_FAILURE;
+  CharPtrEntryType *entry = map->GetEntry(name);
+  if (!entry) {
+    return NS_ERROR_INVALID_ARG;
+  }
+  *id = entry->mData;
+  return NS_OK;
+}
 
-  nsresult rv = GetHistogramByEnumId(entry->mData, ret);
+nsresult
+TelemetryImpl::GetHistogramByName(const nsACString &name, Histogram **ret)
+{
+  Telemetry::ID id;
+  nsresult rv = GetHistogramEnumId(PromiseFlatCString(name).get(), &id);
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
+
+  rv = GetHistogramByEnumId(id, ret);
   if (NS_FAILED(rv))
     return rv;
 
@@ -467,6 +549,69 @@ TelemetryImpl::HistogramFrom(const nsACString &name, const nsACString &existing_
   return WrapAndReturnHistogram(clone, cx, ret);
 }
 
+void
+TelemetryImpl::IdentifyCorruptHistograms(StatisticsRecorder::Histograms &hs)
+{
+  for (HistogramIterator it = hs.begin(); it != hs.end(); ++it) {
+    Histogram *h = *it;
+
+    Telemetry::ID id;
+    nsresult rv = GetHistogramEnumId(h->histogram_name().c_str(), &id);
+    // This histogram isn't a static histogram, just ignore it.
+    if (NS_FAILED(rv)) {
+      continue;
+    }
+
+    if (gCorruptHistograms[id]) {
+      continue;
+    }
+
+    Histogram::SampleSet ss;
+    h->SnapshotSample(&ss);
+    Histogram::Inconsistencies check = h->FindCorruption(ss);
+    bool corrupt = (check != Histogram::NO_INCONSISTENCIES);
+
+    if (corrupt) {
+      Telemetry::ID corruptID = Telemetry::HistogramCount;
+      if (check & Histogram::RANGE_CHECKSUM_ERROR) {
+        corruptID = Telemetry::RANGE_CHECKSUM_ERRORS;
+      } else if (check & Histogram::BUCKET_ORDER_ERROR) {
+        corruptID = Telemetry::BUCKET_ORDER_ERRORS;
+      } else if (check & Histogram::COUNT_HIGH_ERROR) {
+        corruptID = Telemetry::TOTAL_COUNT_HIGH_ERRORS;
+      } else if (check & Histogram::COUNT_LOW_ERROR) {
+        corruptID = Telemetry::TOTAL_COUNT_LOW_ERRORS;
+      }
+      Telemetry::Accumulate(corruptID, 1);
+    }
+
+    gCorruptHistograms[id] = corrupt;
+  }
+}
+
+bool
+TelemetryImpl::ShouldReflectHistogram(Histogram *h)
+{
+  const char *name = h->histogram_name().c_str();
+  Telemetry::ID id;
+  nsresult rv = GetHistogramEnumId(name, &id);
+  if (NS_FAILED(rv)) {
+    // GetHistogramEnumId generally should not fail.  But a lookup
+    // failure shouldn't prevent us from reflecting histograms into JS.
+    //
+    // However, these two histograms are created by Histogram itself for
+    // tracking corruption.  We have our own histograms for that, so
+    // ignore these two.
+    if (strcmp(name, "Histogram.InconsistentCountHigh") == 0
+        || strcmp(name, "Histogram.InconsistentCountLow") == 0) {
+      return false;
+    }
+    return true;
+  } else {
+    return !gCorruptHistograms[id];
+  }
+}
+
 NS_IMETHODIMP
 TelemetryImpl::GetHistogramSnapshots(JSContext *cx, jsval *ret)
 {
@@ -475,16 +620,41 @@ TelemetryImpl::GetHistogramSnapshots(JSContext *cx, jsval *ret)
     return NS_ERROR_FAILURE;
   *ret = OBJECT_TO_JSVAL(root_obj);
 
-  StatisticsRecorder::Histograms h;
-  StatisticsRecorder::GetHistograms(&h);
-  for (StatisticsRecorder::Histograms::iterator it = h.begin(); it != h.end();++it) {
+  StatisticsRecorder::Histograms hs;
+  StatisticsRecorder::GetHistograms(&hs);
+
+  // We identify corrupt histograms first, rather than interspersing it
+  // in the loop below, to ensure that our corruption statistics don't
+  // depend on histogram enumeration order.
+  //
+  // Of course, we hope that all of these corruption-statistics
+  // histograms are not themselves corrupt...
+  IdentifyCorruptHistograms(hs);
+
+  // OK, now we can actually reflect things.
+  for (HistogramIterator it = hs.begin(); it != hs.end(); ++it) {
     Histogram *h = *it;
+    if (!ShouldReflectHistogram(h)) {
+      continue;
+    }
+
     JSObject *hobj = JS_NewObject(cx, NULL, NULL, NULL);
-    if (!(hobj
-          && JS_DefineProperty(cx, root_obj, h->histogram_name().c_str(),
-                               OBJECT_TO_JSVAL(hobj), NULL, NULL, JSPROP_ENUMERATE)
-          && ReflectHistogramSnapshot(cx, hobj, h))) {
+    if (!hobj) {
       return NS_ERROR_FAILURE;
+    }
+    switch (ReflectHistogramSnapshot(cx, hobj, h)) {
+    case REFLECT_CORRUPT:
+      // We can still hit this case even if ShouldReflectHistograms
+      // returns true.  The histogram lies outside of our control
+      // somehow; just skip it.
+      continue;
+    case REFLECT_FAILURE:
+      return NS_ERROR_FAILURE;
+    case REFLECT_OK:
+      if (!JS_DefineProperty(cx, root_obj, h->histogram_name().c_str(),
+                             OBJECT_TO_JSVAL(hobj), NULL, NULL, JSPROP_ENUMERATE)) {
+        return NS_ERROR_FAILURE;
+      }
     }
   }
   return NS_OK;
@@ -560,6 +730,16 @@ TelemetryImpl::CanRecord() {
   return !sTelemetry || sTelemetry->mCanRecord;
 }
 
+NS_IMETHODIMP
+TelemetryImpl::GetCanSend(bool *ret) {
+#if defined(MOZILLA_OFFICIAL) && defined(MOZ_TELEMETRY_REPORTING)
+  *ret = true;
+#else
+  *ret = false;
+#endif
+  return NS_OK;
+}
+
 already_AddRefed<nsITelemetry>
 TelemetryImpl::CreateTelemetryInstance()
 {
@@ -587,7 +767,7 @@ TelemetryImpl::RecordSlowStatement(const nsACString &statement,
   if (!sTelemetry->mCanRecord || !sTelemetry->mTrackedDBs.GetEntry(dbName))
     return;
 
-  nsTHashtable<SlowSQLEntryType> *slowSQLMap = NULL;
+  AutoHashtable<SlowSQLEntryType> *slowSQLMap = NULL;
   if (NS_IsMainThread())
     slowSQLMap = &(sTelemetry->mSlowSQLOnMainThread);
   else
@@ -655,6 +835,12 @@ AccumulateTimeDelta(ID aHistogram, TimeStamp start, TimeStamp end)
 {
   Accumulate(aHistogram,
              static_cast<PRUint32>((end - start).ToMilliseconds()));
+}
+
+bool
+CanRecord()
+{
+  return TelemetryImpl::CanRecord();
 }
 
 base::Histogram*

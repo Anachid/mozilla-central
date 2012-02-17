@@ -215,10 +215,8 @@ Execute(JSContext *cx, JSScript *script, JSObject &scopeChain, Value *rval);
 enum InterpMode
 {
     JSINTERP_NORMAL    = 0, /* interpreter is running normally */
-    JSINTERP_RECORD    = 1, /* interpreter has been started to record/run traces */
-    JSINTERP_PROFILE   = 2, /* interpreter should profile a loop */
-    JSINTERP_REJOIN    = 3, /* as normal, but the frame has already started */
-    JSINTERP_SKIP_TRAP = 4  /* as REJOIN, but skip trap at first opcode */
+    JSINTERP_REJOIN    = 1, /* as normal, but the frame has already started */
+    JSINTERP_SKIP_TRAP = 2  /* as REJOIN, but skip trap at first opcode */
 };
 
 /*
@@ -232,23 +230,14 @@ extern bool
 RunScript(JSContext *cx, JSScript *script, StackFrame *fp);
 
 extern bool
-CheckRedeclaration(JSContext *cx, JSObject *obj, jsid id, uintN attrs);
-
-inline bool
-CheckRedeclaration(JSContext *cx, JSObject *obj, PropertyName *name, uintN attrs)
-{
-    return CheckRedeclaration(cx, obj, ATOM_TO_JSID(name), attrs);
-}
+StrictlyEqual(JSContext *cx, const Value &lval, const Value &rval, bool *equal);
 
 extern bool
-StrictlyEqual(JSContext *cx, const Value &lval, const Value &rval, JSBool *equal);
-
-extern bool
-LooselyEqual(JSContext *cx, const Value &lval, const Value &rval, JSBool *equal);
+LooselyEqual(JSContext *cx, const Value &lval, const Value &rval, bool *equal);
 
 /* === except that NaN is the same as NaN and -0 is not the same as +0. */
 extern bool
-SameValue(JSContext *cx, const Value &v1, const Value &v2, JSBool *same);
+SameValue(JSContext *cx, const Value &v1, const Value &v2, bool *same);
 
 extern JSType
 TypeOfValue(JSContext *cx, const Value &v);

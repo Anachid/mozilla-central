@@ -51,6 +51,13 @@ const WIFIWORKER_CID        = Components.ID("{a14e8977-d259-433a-a88d-58dd44657e
 
 const WIFIWORKER_WORKER     = "resource://gre/modules/network_worker.js";
 
+// A note about errors and error handling in this file:
+// The libraries that we use in this file are intended for C code. For
+// C code, it is natural to return -1 for errors and 0 for success.
+// Therefore, the code that interacts directly with the worker uses this
+// convention (note: command functions do get boolean results since the
+// command always succeeds and we do a string/boolean check for the
+// expected results).
 var WifiManager = (function() {
   var controlWorker = new ChromeWorker(WIFIWORKER_WORKER);
   var eventWorker = new ChromeWorker(WIFIWORKER_WORKER);
@@ -476,15 +483,35 @@ var WifiManager = (function() {
     }
   }
 
+  function parseStatus(status) {
+    if (status === null) {
+      debug("Unable to get wpa supplicant's status");
+      return;
+    }
+
+    var lines = status.split("\n");
+    for (let i = 0; i < lines.length; ++i) {
+      let [key, value] = lines[i].split("=");
+      if (key === "wpa_state") {
+        notify("statechange", { state: value });
+        if (value === "COMPLETED")
+          onconnected();
+      }
+    }
+  }
+
   // try to connect to the supplicant
   var connectTries = 0;
   var retryTimer = null;
   function connectCallback(ok) {
     if (ok === 0) {
-      // tell the event worker to start waiting for events
+      // Tell the event worker to start waiting for events.
       retryTimer = null;
       waitForEvent();
       notify("supplicantconnection");
+
+      // Load up the supplicant state.
+      statusCommand(parseStatus);
       return;
     }
     if (connectTries++ < 3) {
@@ -506,9 +533,40 @@ var WifiManager = (function() {
     connectToSupplicant(connectCallback);
   }
 
+  function onconnected() {
+    runDhcp(manager.ifname, function (data) {
+      if (!data) {
+        debug("DHCP failed to run");
+        return;
+      }
+      setProperty("net.dns1", ipToString(data.dns1), function(ok) {
+        if (!ok) {
+          debug("Unable to set net.dns1");
+          return;
+        }
+        setProperty("net.dns2", ipToString(data.dns2), function(ok) {
+          if (!ok) {
+            debug("Unable to set net.dns2");
+            return;
+          }
+          getProperty("net.dnschange", "0", function(value) {
+            if (value === null) {
+              debug("Unable to get net.dnschange");
+              return;
+            }
+            setProperty("net.dnschange", String(Number(value) + 1), function(ok) {
+              if (!ok)
+                debug("Unable to set net.dnschange");
+            });
+          });
+        });
+      });
+    });
+  }
+
   var supplicantStatesMap = ["DISCONNECTED", "INACTIVE", "SCANNING", "ASSOCIATING",
-                             "FOUR_WAY_HANDSHAKE", "GROUP_HANDSHAKE", "COMPLETED",
-                             "DORMANT", "UNINITIALIZED"];
+                             "ASSOCIATED", "FOUR_WAY_HANDSHAKE", "GROUP_HANDSHAKE",
+                             "COMPLETED", "DORMANT", "UNINITIALIZED"];
   var driverEventMap = { STOPPED: "driverstopped", STARTED: "driverstarted", HANGED: "driverhung" };
 
   // handle events sent to us by the event worker
@@ -523,11 +581,12 @@ var WifiManager = (function() {
       return true;
     }
 
-    var eventData = event.substr(0, event.indexOf(" ") + 1);
+    var space = event.indexOf(" ");
+    var eventData = event.substr(0, space + 1);
     if (eventData.indexOf("CTRL-EVENT-STATE-CHANGE") === 0) {
       // Parse the event data
       var fields = {};
-      var tokens = eventData.split(" ");
+      var tokens = event.substr(space + 1).split(" ");
       for (var n = 0; n < tokens.length; ++n) {
         var kv = tokens[n].split("=");
         if (kv.length === 2)
@@ -569,10 +628,11 @@ var WifiManager = (function() {
       var bssid = eventData.split(" ")[4];
       var id = eventData.substr(eventData.indexOf("id=")).split(" ")[0];
       notify("statechange", { state: "CONNECTED", BSSID: bssid, id: id });
+      onconnected();
       return true;
     }
     if (eventData.indexOf("CTRL-EVENT-SCAN-RESULTS") === 0) {
-      debug("Notifying of scn results available");
+      debug("Notifying of scan results available");
       notify("scanresultsavailable");
       return true;
     }
@@ -591,12 +651,37 @@ var WifiManager = (function() {
     if (enable && airplaneMode)
       return false;
     if (enable) {
-      loadDriver(function (ok) {
-        (ok === 0) ? startSupplicant(callback) : callback(-1);
+      loadDriver(function (status) {
+        if (status < 0) {
+          callback(status);
+          return;
+        }
+        startSupplicant(function (status) {
+          if (status < 0) {
+            callback(status);
+            return;
+          }
+          getProperty("wifi.interface", "tiwlan0", function (ifname) {
+            if (!ifname) {
+              callback(-1);
+              return;
+            }
+            manager.ifname = ifname;
+            enableInterface(ifname, function (ok) {
+              callback(ok ? 0 : -1);
+            });
+          });
+        });
       });
     } else {
-      stopSupplicant(function (ok) {
-        (ok === 0) ? unloadDriver(callback) : callback(-1);
+      stopSupplicant(function (status) {
+        if (ok < 0) {
+          callback(-1);
+          return;
+        }
+        disableInterface(manager.ifname, function (ok) {
+          unloadDriver(callback);
+        });
       });
     }
   }
@@ -693,57 +778,14 @@ var WifiManager = (function() {
   }
 
   function ipToString(n) {
-    return String((n & (0xff << 24)) >> 24) + "." +
-                 ((n & (0xff << 16)) >> 16) + "." +
-                 ((n & (0xff <<  8)) >>  8) + "." +
-                 ((n & (0xff <<  0)) >>  0);
+    return String((n >>  0) & 0xFF) + "." +
+                 ((n >>  8) & 0xFF) + "." +
+                 ((n >> 16) & 0xFF) + "." +
+                 ((n >> 24) & 0xFF);
   }
 
   manager.enableNetwork = function(netId, disableOthers, callback) {
-    getProperty("wifi.interface", "tiwlan0", function (ifname) {
-      if (!ifname) {
-        callback(false);
-        return;
-      }
-      enableInterface(ifname, function (ok) {
-        if (!ok) {
-          callback(false);
-          return;
-        }
-        enableNetworkCommand(netId, disableOthers, function (ok) {
-          if (!ok) {
-            disableInterface(ifname, function () {
-              callback(false);
-            });
-            return;
-          }
-          runDhcp(ifname, function (data) {
-            debug("After running dhcp, got data: " + uneval(data));
-            if (!data) {
-              disableInterface(ifname, function() {
-                callback(false);
-              });
-              return;
-            }
-            setProperty("net.dns1", ipToString(data.dns1), function(ok) {
-              if (!ok) {
-                callback(false);
-                return;
-              }
-              getProperty("net.dnschange", "0", function(value) {
-                if (value === null) {
-                  callback(false);
-                  return;
-                }
-                setProperty("net.dnschange", String(Number(value) + 1), function(ok) {
-                  callback(ok);
-                });
-              });
-            });
-          });
-        });
-      });
-    });
+    enableNetworkCommand(netId, disableOthers, callback);
   }
   manager.disableNetwork = function(netId, callback) {
     disableNetworkCommand(netId, callback);
@@ -764,43 +806,60 @@ function nsWifiWorker() {
     debug("Couldn't connect to supplicant");
   }
 
+  var state;
+  WifiManager.onstatechange = function() {
+    debug("State change: " + state + " -> " + this.state);
+    if (state === "SCANNING" && this.state === "INACTIVE") {
+      // We're not trying to connect so try to find an open Mozilla network.
+      // TODO Remove me in favor of UI and a way to select a network.
+
+      debug("Haven't connected to a network, trying a default (for now)");
+      var name = "Mozilla";
+      var net = networks[name];
+      if (net && (net[1] && net[1] !== "[IBSS]")) {
+        debug("Network Mozilla exists, but is encrypted");
+        net = null;
+      }
+      if (!net) {
+        name = "Mozilla Guest";
+        net = networks[name];
+        if (!net || (net[1] && net[1] !== "[IBSS]")) {
+          debug("Network Mozilla Guest doesn't exist or is encrypted");
+          return;
+        }
+      }
+
+      var config = Object.create(null);
+      config["ssid"] = '"' + name + '"';
+      config["key_mgmt"] = "NONE";
+      WifiManager.addNetwork(config, function(ok) {
+        if (!ok) {
+          debug("Unable to add the network!");
+          return;
+        }
+
+        WifiManager.enableNetwork(config.netId, false, function(ok) {
+          debug((ok ? "Successfully enabled " : "Didn't enable ") + name);
+        });
+      });
+    }
+
+    state = this.state;
+  }
+
   var networks = Object.create(null);
   WifiManager.onscanresultsavailable = function() {
     debug("Scan results are available! Asking for them.");
-    if (networks["Mozilla Guest"])
-      return;
     WifiManager.getScanResults(function(r) {
       let lines = r.split("\n");
       // NB: Skip the header line.
-      let added = !("Mozilla Guest" in networks);
       for (let i = 1; i < lines.length; ++i) {
         // bssid / frequency / signal level / flags / ssid
         var match = /([\S]+)\s+([\S]+)\s+([\S]+)\s+(\[[\S]+\])?\s+(.*)/.exec(lines[i])
         if (match)
-          networks[match[5]] = match[1];
+          networks[match[5]] = [match[1], match[4]];
         else
           debug("Match didn't find anything for: " + lines[i]);
-      }
-
-      if (("Mozilla Guest" in networks) && added) {
-        debug("Mozilla Guest exists in networks, trying to connect!");
-        var config = Object.create(null);
-        config["ssid"] = '"Mozilla Guest"';
-        //config["bssid"] = '"' + networks["Mozilla Guest"] + '"';
-        config["key_mgmt"] = "NONE";
-        config["scan_ssid"] = 1;
-        WifiManager.addNetwork(config, function (ok) {
-          if (ok) {
-            WifiManager.enableNetwork(config.netId, false, function (ok) {
-              if (ok)
-                debug("Enabled the network!");
-              else
-                debug("Failed to enable the network :(");
-            });
-          } else {
-            debug("Failed to add the network :(");
-          }
-        });
       }
     });
   }

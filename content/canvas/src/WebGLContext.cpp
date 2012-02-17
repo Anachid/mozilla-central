@@ -221,7 +221,6 @@ WebGLContext::WebGLContext()
     : mCanvasElement(nsnull),
       gl(nsnull)
 {
-    mWidth = mHeight = 0;
     mGeneration = 0;
     mInvalidated = false;
     mResetLayer = true;
@@ -501,9 +500,9 @@ WebGLContext::SetDimensions(PRInt32 width, PRInt32 height)
 
     bool forceOSMesa =
         Preferences::GetBool("webgl.force_osmesa", false);
+#ifdef XP_WIN
     bool preferEGL =
         Preferences::GetBool("webgl.prefer-egl", false);
-#ifdef XP_WIN
     bool preferOpenGL =
         Preferences::GetBool("webgl.prefer-native-gl", false);
 #endif
@@ -566,13 +565,18 @@ WebGLContext::SetDimensions(PRInt32 width, PRInt32 height)
         }
     }
 
+#ifdef XP_WIN
     if (PR_GetEnv("MOZ_WEBGL_PREFER_EGL")) {
         preferEGL = true;
     }
+#endif
 
     // Ask GfxInfo about what we should use
     bool useOpenGL = true;
+
+#ifdef XP_WIN
     bool useANGLE = true;
+#endif
 
     if (gfxInfo && !forceEnabled) {
         if (NS_SUCCEEDED(gfxInfo->GetFeatureStatus(nsIGfxInfo::FEATURE_WEBGL_OPENGL, &status))) {
@@ -580,19 +584,23 @@ WebGLContext::SetDimensions(PRInt32 width, PRInt32 height)
                 useOpenGL = false;
             }
         }
+#ifdef XP_WIN
         if (NS_SUCCEEDED(gfxInfo->GetFeatureStatus(nsIGfxInfo::FEATURE_WEBGL_ANGLE, &status))) {
             if (status != nsIGfxInfo::FEATURE_NO_INFO) {
                 useANGLE = false;
             }
         }
+#endif
     }
 
+#ifdef XP_WIN
     // allow forcing GL and not EGL/ANGLE
     if (PR_GetEnv("MOZ_WEBGL_FORCE_OPENGL")) {
         preferEGL = false;
         useANGLE = false;
         useOpenGL = true;
     }
+#endif
 
     // if we're forcing osmesa, do it first
     if (forceOSMesa) {
@@ -614,35 +622,32 @@ WebGLContext::SetDimensions(PRInt32 width, PRInt32 height)
                     gl->SetFlushGuaranteesResolve(true);
                 }
             } else {
-                gl = nsnull;
+                LogMessage("Error during ANGLE OpenGL ES initialization");
+                return NS_ERROR_FAILURE;
             }
-        }
-    }
-
-    // if it failed, then try the default provider, whatever that is
-    if (!gl && useOpenGL) {
-        gl = gl::GLContextProvider::CreateOffscreen(gfxIntSize(width, height), format);
-        if (gl && !InitAndValidateGL()) {
-            gl = nsnull;
-        }
-    }
-#else
-    // other platforms just use whatever the default is
-    if (!gl && useOpenGL) {
-        gl = gl::GLContextProvider::CreateOffscreen(gfxIntSize(width, height), format);
-        if (gl && !InitAndValidateGL()) {
-            gl = nsnull;
         }
     }
 #endif
 
+    // try the default provider, whatever that is
+    if (!gl && useOpenGL) {
+        gl = gl::GLContextProvider::CreateOffscreen(gfxIntSize(width, height), format);
+        if (gl && !InitAndValidateGL()) {
+            LogMessage("Error during OpenGL initialization");
+            return NS_ERROR_FAILURE;
+        }
+    }
+
     // finally, try OSMesa
     if (!gl) {
         gl = gl::GLContextProviderOSMesa::CreateOffscreen(gfxIntSize(width, height), format);
-        if (!gl || !InitAndValidateGL()) {
-            gl = nsnull;
-        } else {
-            LogMessage("Using software rendering via OSMesa (THIS WILL BE SLOW)");
+        if (gl) {
+            if (!InitAndValidateGL()) {
+                LogMessage("Error during OSMesa initialization");
+                return NS_ERROR_FAILURE;
+            } else {
+                LogMessage("Using software rendering via OSMesa (THIS WILL BE SLOW)");
+            }
         }
     }
 
@@ -1018,10 +1023,12 @@ WebGLContext::ForceClearFramebufferWithDefaultValues(PRUint32 mask, const nsIntR
     bool initializeDepthBuffer = 0 != (mask & LOCAL_GL_DEPTH_BUFFER_BIT);
     bool initializeStencilBuffer = 0 != (mask & LOCAL_GL_STENCIL_BUFFER_BIT);
 
+    // fun GL fact: no need to worry about the viewport here, glViewport is just setting up a coordinates transformation,
+    // it doesn't affect glClear at all
+
     // prepare GL state for clearing
     gl->fDisable(LOCAL_GL_SCISSOR_TEST);
     gl->fDisable(LOCAL_GL_DITHER);
-    gl->PushViewportRect(viewportRect);
 
     if (initializeColorBuffer) {
         gl->fColorMask(1, 1, 1, 1);
@@ -1064,8 +1071,6 @@ WebGLContext::ForceClearFramebufferWithDefaultValues(PRUint32 mask, const nsIntR
         gl->fClearStencil(mStencilClearValue);
     }
 
-    gl->PopViewportRect();
-
     if (mDitherEnabled)
         gl->fEnable(LOCAL_GL_DITHER);
     else
@@ -1099,6 +1104,17 @@ WebGLContext::EnsureBackbufferClearedAsNeeded()
     Invalidate();
 }
 
+nsresult
+WebGLContext::DummyFramebufferOperation(const char *info)
+{
+    WebGLenum status;
+    CheckFramebufferStatus(LOCAL_GL_FRAMEBUFFER, &status);
+    if (status == LOCAL_GL_FRAMEBUFFER_COMPLETE)
+        return NS_OK;
+    else
+        return ErrorInvalidFramebufferOperation("%s: incomplete framebuffer", info);
+}
+
 // We use this timer for many things. Here are the things that it is activated for:
 // 1) If a script is using the MOZ_WEBGL_lose_context extension.
 // 2) If we are using EGL and _NOT ANGLE_, we query periodically to see if the
@@ -1124,8 +1140,8 @@ WebGLContext::Notify(nsITimer* timer)
         nsContentUtils::DispatchTrustedEvent(HTMLCanvasElement()->OwnerDoc(),
                                              (nsIDOMHTMLCanvasElement*) HTMLCanvasElement(),
                                              NS_LITERAL_STRING("webglcontextlost"),
-                                             PR_TRUE,
-                                             PR_TRUE,
+                                             true,
+                                             true,
                                              &defaultAction);
 
         // If the script didn't handle the event, we don't allow restores.
@@ -1153,8 +1169,8 @@ WebGLContext::Notify(nsITimer* timer)
         nsContentUtils::DispatchTrustedEvent(HTMLCanvasElement()->OwnerDoc(),
                                              (nsIDOMHTMLCanvasElement*) HTMLCanvasElement(),
                                              NS_LITERAL_STRING("webglcontextrestored"),
-                                             PR_TRUE,
-                                             PR_TRUE);
+                                             true,
+                                             true);
         // Set all flags back to the state they were in before the context was
         // lost.
         mContextLostErrorSet = false;

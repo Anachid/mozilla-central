@@ -82,16 +82,6 @@
 // Set when the database file was found corrupt by a previous maintenance.
 #define PREF_FORCE_DATABASE_REPLACEMENT "places.database.replaceOnStartup"
 
-// The wanted size of the cache.  This is calculated based on current database
-// size and clamped to the limits specified below.
-#define DATABASE_CACHE_TO_DATABASE_PERC 10
-// The minimum size of the cache.  We should never work without a cache, since
-// that would badly hurt WAL journaling mode.
-#define DATABASE_CACHE_MIN_BYTES (PRUint64)4194304 // 4MiB
-// The maximum size of the cache.  This is the maximum memory that each
-// connection may use.
-#define DATABASE_CACHE_MAX_BYTES (PRUint64)8388608 // 8MiB
-
 // Maximum size for the WAL file.  It should be small enough since in case of
 // crashes we could lose all the transactions in the file.  But a too small
 // file could hurt performance.
@@ -567,39 +557,6 @@ Database::InitSchema(bool* aDatabaseMigrated)
       MOZ_STORAGE_UNIQUIFY_QUERY_STR "PRAGMA temp_store = MEMORY"));
   NS_ENSURE_SUCCESS(rv, rv);
 
-  // Get the current database size. Due to chunked growth we have to use
-  // page_count to evaluate it.
-  PRUint64 databaseSizeBytes = 0;
-  {
-    nsCOMPtr<mozIStorageStatement> statement;
-    nsresult rv = mMainConn->CreateStatement(NS_LITERAL_CSTRING(
-      "PRAGMA page_count"
-    ), getter_AddRefs(statement));
-    NS_ENSURE_SUCCESS(rv, rv);
-    bool hasResult = false;
-    rv = statement->ExecuteStep(&hasResult);
-    NS_ENSURE_TRUE(NS_SUCCEEDED(rv) && hasResult, NS_ERROR_FAILURE);
-    PRInt32 pageCount = 0;
-    rv = statement->GetInt32(0, &pageCount);
-    NS_ENSURE_SUCCESS(rv, rv);
-    databaseSizeBytes = pageCount * mDBPageSize;
-  }
-
-  // Clamp the cache size to a percentage of the database size, forcing
-  // meaningful limits.
-  PRInt64 cacheSize = clamped(databaseSizeBytes *  DATABASE_CACHE_TO_DATABASE_PERC / 100,
-                              DATABASE_CACHE_MIN_BYTES,
-                              DATABASE_CACHE_MAX_BYTES);
-
-  // Set the number of cached pages.
-  // We don't use PRAGMA default_cache_size, since the database could be moved
-  // among different devices and the value would adapt accordingly.
-  nsCAutoString cacheSizePragma(MOZ_STORAGE_UNIQUIFY_QUERY_STR
-				"PRAGMA cache_size = ");
-  cacheSizePragma.AppendInt(cacheSize / mDBPageSize);
-  rv = mMainConn->ExecuteSimpleSQL(cacheSizePragma);
-  NS_ENSURE_SUCCESS(rv, rv);
-
   // Be sure to set journal mode after page_size.  WAL would prevent the change
   // otherwise.
   if (NS_SUCCEEDED(SetJournalMode(mMainConn, JOURNAL_WAL))) {
@@ -737,6 +694,13 @@ Database::InitSchema(bool* aDatabaseMigrated)
 
       // Firefox 11 uses schema version 16.
 
+      if (currentSchemaVersion < 17) {
+        rv = MigrateV17Up();
+        NS_ENSURE_SUCCESS(rv, rv);
+      }
+
+      // Firefox 12 uses schema version 17.
+
       // Schema Upgrades must add migration code here.
 
       rv = UpdateBookmarkRootTitles();
@@ -778,6 +742,12 @@ Database::InitSchema(bool* aDatabaseMigrated)
 
     // moz_inputhistory.
     rv = mMainConn->ExecuteSimpleSQL(CREATE_MOZ_INPUTHISTORY);
+    NS_ENSURE_SUCCESS(rv, rv);
+
+    // moz_hosts.
+    rv = mMainConn->ExecuteSimpleSQL(CREATE_MOZ_HOSTS);
+    NS_ENSURE_SUCCESS(rv, rv);
+    rv = mMainConn->ExecuteSimpleSQL(CREATE_IDX_MOZ_HOSTS_FRECENCYHOST);
     NS_ENSURE_SUCCESS(rv, rv);
 
     // moz_bookmarks.
@@ -927,6 +897,8 @@ Database::InitFunctions()
   NS_ENSURE_SUCCESS(rv, rv);
   rv = GenerateGUIDFunction::create(mMainConn);
   NS_ENSURE_SUCCESS(rv, rv);
+  rv = FixupURLFunction::create(mMainConn);
+  NS_ENSURE_SUCCESS(rv, rv);
 
   return NS_OK;
 }
@@ -939,6 +911,14 @@ Database::InitTempTriggers()
   nsresult rv = mMainConn->ExecuteSimpleSQL(CREATE_HISTORYVISITS_AFTERINSERT_TRIGGER);
   NS_ENSURE_SUCCESS(rv, rv);
   rv = mMainConn->ExecuteSimpleSQL(CREATE_HISTORYVISITS_AFTERDELETE_TRIGGER);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  // Add the triggers that update the moz_hosts table as necessary.
+  rv = mMainConn->ExecuteSimpleSQL(CREATE_PLACES_AFTERINSERT_TRIGGER);
+  NS_ENSURE_SUCCESS(rv, rv);
+  rv = mMainConn->ExecuteSimpleSQL(CREATE_PLACES_AFTERDELETE_TRIGGER);
+  NS_ENSURE_SUCCESS(rv, rv);
+  rv = mMainConn->ExecuteSimpleSQL(CREATE_PLACES_AFTERUPDATE_TRIGGER);
   NS_ENSURE_SUCCESS(rv, rv);
 
   return NS_OK;
@@ -1622,6 +1602,56 @@ Database::MigrateV16Up()
     "SET guid = GENERATE_GUID() "
     "WHERE guid ISNULL "
   ));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  return NS_OK;
+}
+
+nsresult
+Database::MigrateV17Up()
+{
+  MOZ_ASSERT(NS_IsMainThread());
+
+  bool tableExists = false;
+
+  nsresult rv = mMainConn->TableExists(NS_LITERAL_CSTRING("moz_hosts"), &tableExists);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  if (!tableExists) {
+    // For anyone who used in-development versions of this autocomplete,
+    // drop the old tables and its indexes.
+    rv = mMainConn->ExecuteSimpleSQL(NS_LITERAL_CSTRING(
+      "DROP INDEX IF EXISTS moz_hostnames_frecencyindex"
+    ));
+    NS_ENSURE_SUCCESS(rv, rv);
+    rv = mMainConn->ExecuteSimpleSQL(NS_LITERAL_CSTRING(
+      "DROP TABLE IF EXISTS moz_hostnames"
+    ));
+    NS_ENSURE_SUCCESS(rv, rv);
+
+    // Add the moz_hosts table so we can get hostnames for URL autocomplete.
+    rv = mMainConn->ExecuteSimpleSQL(CREATE_MOZ_HOSTS);
+    NS_ENSURE_SUCCESS(rv, rv);
+    rv = mMainConn->ExecuteSimpleSQL(CREATE_IDX_MOZ_HOSTS_FRECENCYHOST);
+    NS_ENSURE_SUCCESS(rv, rv);
+  }
+
+  // Fill the moz_hosts table with all the domains in moz_places.
+  nsCOMPtr<mozIStorageAsyncStatement> fillHostsStmt;
+  rv = mMainConn->CreateAsyncStatement(NS_LITERAL_CSTRING(
+    "INSERT OR IGNORE INTO moz_hosts (host, frecency) "
+        "SELECT fixup_url(get_unreversed_host(h.rev_host)) AS host, "
+               "(SELECT MAX(frecency) FROM moz_places "
+                "WHERE rev_host = h.rev_host OR rev_host = h.rev_host || 'www.'"
+               ") AS frecency "
+        "FROM moz_places h "
+        "WHERE LENGTH(h.rev_host) > 1 "
+        "GROUP BY h.rev_host"
+  ), getter_AddRefs(fillHostsStmt));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  nsCOMPtr<mozIStoragePendingStatement> ps;
+  rv = fillHostsStmt->ExecuteAsync(nsnull, getter_AddRefs(ps));
   NS_ENSURE_SUCCESS(rv, rv);
 
   return NS_OK;

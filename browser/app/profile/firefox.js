@@ -65,6 +65,7 @@ pref("extensions.minCompatibleAppVersion", "4.0");
 pref("extensions.getAddons.cache.enabled", true);
 pref("extensions.getAddons.maxResults", 15);
 pref("extensions.getAddons.get.url", "https://services.addons.mozilla.org/%LOCALE%/firefox/api/%API_VERSION%/search/guid:%IDS%?src=firefox&appOS=%OS%&appVersion=%VERSION%");
+pref("extensions.getAddons.getWithPerformance.url", "https://services.addons.mozilla.org/%LOCALE%/firefox/api/%API_VERSION%/search/guid:%IDS%?src=firefox&appOS=%OS%&appVersion=%VERSION%&tMain=%TIME_MAIN%&tFirstPaint=%TIME_FIRST_PAINT%&tSessionRestored=%TIME_SESSION_RESTORED%");
 pref("extensions.getAddons.search.browseURL", "https://addons.mozilla.org/%LOCALE%/firefox/search?q=%TERMS%");
 pref("extensions.getAddons.search.url", "https://services.addons.mozilla.org/%LOCALE%/firefox/api/%API_VERSION%/search/%TERMS%/all/%MAX_RESULTS%/%OS%/%VERSION%/%COMPATIBILITY_MODE%?src=firefox");
 pref("extensions.webservice.discoverURL", "https://services.addons.mozilla.org/%LOCALE%/firefox/discovery/pane/%VERSION%/%OS%/%COMPATIBILITY_MODE%");
@@ -237,15 +238,14 @@ pref("keyword.URL", "");
 pref("general.useragent.locale", "@AB_CD@");
 pref("general.skins.selectedSkin", "classic/1.0");
 
-pref("general.smoothScroll", false);
+pref("general.smoothScroll", true);
 #ifdef UNIX_BUT_NOT_MAC
 pref("general.autoScroll", false);
 #else
 pref("general.autoScroll", true);
 #endif
 
-// Whether or not the application should check at startup each time if it 
-// is the default browser.
+// At startup, check if we're the default browser and prompt user if not.
 pref("browser.shell.checkDefaultBrowser", true);
 
 // 0 = blank, 1 = home (browser.startup.homepage), 2 = last visited page, 3 = resume previous browser session
@@ -356,6 +356,9 @@ pref("browser.search.order.3",                "chrome://browser-region/locale/re
 
 // search bar results always open in a new tab
 pref("browser.search.openintab", false);
+
+// context menu searches open in the foreground
+pref("browser.search.context.loadInBackground", false);
 
 // send ping to the server to update
 pref("browser.search.update", true);
@@ -804,6 +807,10 @@ pref("browser.sessionstore.max_resumed_crashes", 1);
 pref("browser.sessionstore.restore_on_demand", false);
 // Whether to automatically restore hidden tabs (i.e., tabs in other tab groups) or not
 pref("browser.sessionstore.restore_hidden_tabs", false);
+// If restore_on_demand is set, pinned tabs are restored on startup by default.
+// When set to true, this pref overrides that behavior, and pinned tabs will only
+// be restored when they are focused.
+pref("browser.sessionstore.restore_pinned_tabs_on_demand", false);
 
 // allow META refresh by default
 pref("accessibility.blockautorefresh", false);
@@ -1027,14 +1034,19 @@ pref("devtools.errorconsole.enabled", false);
 pref("devtools.inspector.enabled", true);
 pref("devtools.inspector.htmlHeight", 112);
 
+// Enable the Debugger
+pref("devtools.debugger.enabled", false);
+
+// The default Debugger UI height
+pref("devtools.debugger.ui.height", 250);
+
 // Enable the style inspector
 pref("devtools.styleinspector.enabled", true);
 
 // Enable the Tilt inspector
 pref("devtools.tilt.enabled", true);
-
-// Enable the Tilt inspector even if WebGL capabilities are not detected
-pref("devtools.tilt.force-enabled", false);
+pref("devtools.tilt.intro_transition", true);
+pref("devtools.tilt.outro_transition", true);
 
 // Enable the rules view
 pref("devtools.ruleview.enabled", true);
@@ -1044,12 +1056,13 @@ pref("devtools.scratchpad.enabled", true);
 
 // Enable the Style Editor.
 pref("devtools.styleeditor.enabled", true);
+pref("devtools.styleeditor.transitions", true);
 
 // Enable tools for Chrome development.
 pref("devtools.chrome.enabled", false);
 
 // Disable the GCLI enhanced command line.
-pref("devtools.gcli.enable", true);
+pref("devtools.gcli.enable", false);
 
 // The last Web Console height. This is initially 0 which means that the Web
 // Console will use the default height next time it shows.
@@ -1090,12 +1103,9 @@ pref("devtools.editor.expandtab", true);
 // Tells which component you want to use for source editing in developer tools.
 //
 // Available components:
-//   "textarea" - this is a basic text editor, like an HTML <textarea>.
-//
 //   "orion" - this is the Orion source code editor from the Eclipse project. It
 //   provides programmer-specific editor features such as syntax highlighting,
-//   indenting and bracket recognition. It may not be appropriate for all
-//   locales (esp. RTL) or a11y situations.
+//   indenting and bracket recognition.
 pref("devtools.editor.component", "orion");
 
 // Whether the character encoding menu is under the main Firefox button. This
@@ -1107,5 +1117,16 @@ pref("prompts.tab_modal.enabled", true);
 // Whether the Panorama should animate going in/out of tabs
 pref("browser.panorama.animate_zoom", true);
 
+// Defines the url to be used for new tabs.
+pref("browser.newtab.url", "about:newtab");
+
+// Toggles the content of 'about:newtab'. Shows the grid when enabled.
+pref("browser.newtabpage.enabled", true);
+
 // Enable the DOM full-screen API.
 pref("full-screen-api.enabled", true);
+
+// Startup Crash Tracking
+// number of startup crashes that can occur before starting into safe mode automatically
+// (this pref has no effect if more than 6 hours have passed since the last crash)
+pref("toolkit.startup.max_resumed_crashes", 2);

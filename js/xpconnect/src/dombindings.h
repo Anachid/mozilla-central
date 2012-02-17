@@ -183,7 +183,9 @@ private:
     };
 
     static Properties sProtoProperties[];
+    static size_t sProtoPropertiesCount;
     static Methods sProtoMethods[];
+    static size_t sProtoMethodsCount;
 
     static JSObject *ensureExpandoObject(JSContext *cx, JSObject *obj);
 
@@ -218,9 +220,9 @@ public:
                                   JSPropertyDescriptor *desc);
     bool defineProperty(JSContext *cx, JSObject *proxy, jsid id,
                         JSPropertyDescriptor *desc);
-    bool getOwnPropertyNames(JSContext *cx, JSObject *proxy, js::AutoIdVector &props);
+    bool getOwnPropertyNames(JSContext *cx, JSObject *proxy, JS::AutoIdVector &props);
     bool delete_(JSContext *cx, JSObject *proxy, jsid id, bool *bp);
-    bool enumerate(JSContext *cx, JSObject *proxy, js::AutoIdVector &props);
+    bool enumerate(JSContext *cx, JSObject *proxy, JS::AutoIdVector &props);
     bool fix(JSContext *cx, JSObject *proxy, JS::Value *vp);
 
     bool has(JSContext *cx, JSObject *proxy, jsid id, bool *bp);
@@ -230,7 +232,7 @@ public:
                              uint32_t index, JS::Value *vp, bool *present);
     bool set(JSContext *cx, JSObject *proxy, JSObject *receiver, jsid id, bool strict,
              JS::Value *vp);
-    bool keys(JSContext *cx, JSObject *proxy, js::AutoIdVector &props);
+    bool keys(JSContext *cx, JSObject *proxy, JS::AutoIdVector &props);
     bool iterate(JSContext *cx, JSObject *proxy, uintN flags, JS::Value *vp);
 
     /* Spidermonkey extensions. */
@@ -244,14 +246,15 @@ public:
     static bool objIsList(JSObject *obj) {
         return js::IsProxy(obj) && proxyHandlerIsList(js::GetProxyHandler(obj));
     }
-    static bool instanceIsListObject(JSContext *cx, JSObject *obj, JSObject *callee);
+    static inline bool instanceIsListObject(JSContext *cx, JSObject *obj, JSObject *callee);
     virtual bool isInstanceOf(JSObject *prototype)
     {
         return js::GetObjectClass(prototype) == &sInterfaceClass;
     }
-    static ListType *getListObject(JSObject *obj);
+    static inline ListType *getListObject(JSObject *obj);
 
     static JSObject *getPrototype(JSContext *cx, XPCWrappedNativeScope *scope);
+    static inline bool protoIsClean(JSContext *cx, JSObject *proto, bool *isClean);
     static bool shouldCacheProtoShape(JSContext *cx, JSObject *proto, bool *shouldCache);
     static bool resolveNativeName(JSContext *cx, JSObject *proxy, jsid id,
                                   JSPropertyDescriptor *desc);

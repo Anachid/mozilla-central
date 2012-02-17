@@ -57,11 +57,11 @@ void
 PrintBytecode(JSContext *cx, JSScript *script, jsbytecode *pc)
 {
     printf("#%u:", script->id());
-    LifoAlloc lifoAlloc(1024);
-    Sprinter sprinter;
-    INIT_SPRINTER(cx, &sprinter, &lifoAlloc, 0);
+    Sprinter sprinter(cx);
+    if (!sprinter.init())
+        return;
     js_Disassemble1(cx, script, pc, pc - script->code, true, &sprinter);
-    fprintf(stdout, "%s", sprinter.base);
+    fprintf(stdout, "%s", sprinter.string());
 }
 #endif
 
@@ -119,7 +119,7 @@ ScriptAnalysis::checkAliasedName(JSContext *cx, jsbytecode *pc)
 
     JSAtom *atom;
     if (JSOp(*pc) == JSOP_DEFFUN) {
-        JSFunction *fun = script->getFunction(js_GetIndexFromBytecode(script, pc, 0));
+        JSFunction *fun = script->getFunction(GET_UINT32_INDEX(pc));
         atom = fun->atom;
     } else {
         JS_ASSERT(JOF_TYPE(js_CodeSpec[*pc].format) == JOF_ATOM);
@@ -133,29 +133,6 @@ ScriptAnalysis::checkAliasedName(JSContext *cx, jsbytecode *pc)
         escapedSlots[ArgSlot(index)] = true;
     else if (kind == VARIABLE)
         escapedSlots[LocalSlot(script, index)] = true;
-}
-
-// return whether op bytecodes do not fallthrough (they may do a jump).
-static inline bool
-BytecodeNoFallThrough(JSOp op)
-{
-    switch (op) {
-      case JSOP_GOTO:
-      case JSOP_DEFAULT:
-      case JSOP_RETURN:
-      case JSOP_STOP:
-      case JSOP_RETRVAL:
-      case JSOP_THROW:
-      case JSOP_TABLESWITCH:
-      case JSOP_LOOKUPSWITCH:
-      case JSOP_FILTER:
-        return true;
-      case JSOP_GOSUB:
-        // these fall through indirectly, after executing a 'finally'.
-        return false;
-      default:
-        return false;
-    }
 }
 
 void
@@ -838,7 +815,7 @@ ScriptAnalysis::analyzeLifetimes(JSContext *cx)
 
                     jsbytecode *entrypc = script->code + entry;
 
-                    if (JSOp(*entrypc) == JSOP_GOTO)
+                    if (JSOp(*entrypc) == JSOP_GOTO || JSOp(*entrypc) == JSOP_FILTER)
                         loop->entry = entry + GET_JUMP_OFFSET(entrypc);
                     else
                         loop->entry = targetOffset;
@@ -846,6 +823,8 @@ ScriptAnalysis::analyzeLifetimes(JSContext *cx)
                     /* Do-while loop at the start of the script. */
                     loop->entry = targetOffset;
                 }
+                JS_ASSERT(script->code[loop->entry] == JSOP_LOOPHEAD ||
+                          script->code[loop->entry] == JSOP_LOOPENTRY);
             } else {
                 for (unsigned i = 0; i < savedCount; i++) {
                     LifetimeVariable &var = *saved[i];
@@ -961,12 +940,15 @@ ScriptAnalysis::killVariable(JSContext *cx, LifetimeVariable &var, unsigned offs
         /*
          * The variable is live even before the write, due to an enclosing try
          * block. We need to split the lifetime to indicate there was a write.
+         * We set the new interval's savedEnd to 0, since it will always be
+         * adjacent to the old interval, so it never needs to be extended.
          */
-        var.lifetime = cx->typeLifoAlloc().new_<Lifetime>(start, offset, var.lifetime);
+        var.lifetime = cx->typeLifoAlloc().new_<Lifetime>(start, 0, var.lifetime);
         if (!var.lifetime) {
             setOOM(cx);
             return;
         }
+        var.lifetime->end = offset;
     } else {
         var.saved = var.lifetime;
         var.savedEnd = 0;
@@ -994,25 +976,43 @@ ScriptAnalysis::extendVariable(JSContext *cx, LifetimeVariable &var,
     var.lifetime->start = start;
 
     /*
-     * When walking backwards through loop bodies, we don't know which vars
-     * are live at the loop's backedge. We save the endpoints for lifetime
-     * segments which we *would* use if the variables were live at the backedge
-     * and extend the variable with new lifetimes if we find the variable is
-     * indeed live at the head of the loop.
+     * Consider this code:
      *
-     * while (...) {
-     *   if (x #1) { ... }
-     *   ...
-     *   if (... #2) { x = 0; #3}
-     * }
+     *   while (...) { (#1)
+     *       use x;    (#2)
+     *       ...
+     *       x = ...;  (#3)
+     *       ...
+     *   }             (#4)
      *
-     * If x is not live after the loop, we treat it as dead in the walk and
-     * make a point lifetime for the write at #3. At the beginning of that
-     * basic block (#2), we save the loop endpoint; if we knew x was live in
-     * the next iteration then a new lifetime would be made here. At #1 we
-     * mark x live again, make a segment between the head of the loop and #1,
-     * and then extend x with loop tail lifetimes from #1 to #2, and from #3
-     * to the back edge.
+     * Just before analyzing the while statement, there would be a live range
+     * from #1..#2 and a "point range" at #3. The job of extendVariable is to
+     * create a new live range from #3..#4.
+     *
+     * However, more extensions may be required if the definition of x is
+     * conditional. Consider the following.
+     *
+     *   while (...) {     (#1)
+     *       use x;        (#2)
+     *       ...
+     *       if (...)      (#5)
+     *           x = ...;  (#3)
+     *       ...
+     *   }                 (#4)
+     *
+     * Assume that x is not used after the loop. Then, before extendVariable is
+     * run, the live ranges would be the same as before (#1..#2 and #3..#3). We
+     * still need to create a range from #3..#4. But, since the assignment at #3
+     * may never run, we also need to create a range from #2..#3. This is done
+     * as follows.
+     *
+     * Each time we create a Lifetime, we store the start of the most recently
+     * seen sequence of conditional code in the Lifetime's savedEnd field. So,
+     * when creating the Lifetime at #2, we set the Lifetime's savedEnd to
+     * #5. (The start of the most recent conditional is cached in each
+     * variable's savedEnd field.) Consequently, extendVariable is able to
+     * create a new interval from #2..#5 using the savedEnd field of the
+     * existing #1..#2 interval.
      */
 
     Lifetime *segment = var.lifetime;
@@ -1342,29 +1342,16 @@ ScriptAnalysis::analyzeSSA(JSContext *cx)
 
         stackDepth += ndefs;
 
-        switch (op) {
-          case JSOP_SETARG:
-          case JSOP_SETLOCAL:
-          case JSOP_SETLOCALPOP:
-          case JSOP_DEFLOCALFUN:
-          case JSOP_DEFLOCALFUN_FC:
-          case JSOP_INCARG:
-          case JSOP_DECARG:
-          case JSOP_ARGINC:
-          case JSOP_ARGDEC:
-          case JSOP_INCLOCAL:
-          case JSOP_DECLOCAL:
-          case JSOP_LOCALINC:
-          case JSOP_LOCALDEC: {
+        if (BytecodeUpdatesSlot(op)) {
             uint32_t slot = GetBytecodeSlot(script, pc);
             if (trackSlot(slot)) {
                 mergeBranchTarget(cx, values[slot], slot, branchTargets);
                 mergeExceptionTarget(cx, values[slot], slot, exceptionTargets);
                 values[slot].initWritten(slot, offset);
             }
-            break;
-          }
+        }
 
+        switch (op) {
           case JSOP_GETARG:
           case JSOP_GETLOCAL: {
             uint32_t slot = GetBytecodeSlot(script, pc);
@@ -1471,6 +1458,13 @@ ScriptAnalysis::analyzeSSA(JSContext *cx)
             break;
           }
 
+          case JSOP_THROW:
+          case JSOP_RETURN:
+          case JSOP_STOP:
+          case JSOP_RETRVAL:
+            mergeAllExceptionTargets(cx, values, exceptionTargets);
+            break;
+
           default:;
         }
 
@@ -1533,7 +1527,7 @@ ScriptAnalysis::insertPhi(JSContext *cx, SSAValue &phi, const SSAValue &v)
      */
     if (node->length <= 8) {
         for (unsigned i = 0; i < node->length; i++) {
-            if (v.equals(node->options[i]))
+            if (v == node->options[i])
                 return;
         }
     }
@@ -1577,7 +1571,7 @@ ScriptAnalysis::mergeValue(JSContext *cx, uint32_t offset, const SSAValue &v, Sl
     /* Make sure that v is accounted for in the pending value or phi value at pv. */
     JS_ASSERT(v.kind() != SSAValue::EMPTY && pv->value.kind() != SSAValue::EMPTY);
 
-    if (v.equals(pv->value))
+    if (v == pv->value)
         return;
 
     if (pv->value.kind() != SSAValue::PHI || pv->value.phiOffset() < offset) {
@@ -1703,16 +1697,35 @@ ScriptAnalysis::mergeExceptionTarget(JSContext *cx, const SSAValue &value, uint3
      * seen at exception handlers via exception paths.
      */
     for (unsigned i = 0; i < exceptionTargets.length(); i++) {
-        Vector<SlotValue> *pending = getCode(exceptionTargets[i]).pendingValues;
+        unsigned offset = exceptionTargets[i];
+        Vector<SlotValue> *pending = getCode(offset).pendingValues;
 
         bool duplicate = false;
         for (unsigned i = 0; i < pending->length(); i++) {
-            if ((*pending)[i].slot == slot && (*pending)[i].value.equals(value))
+            if ((*pending)[i].slot == slot) {
                 duplicate = true;
+                SlotValue &v = (*pending)[i];
+                mergeValue(cx, offset, value, &v);
+                break;
+            }
         }
 
         if (!duplicate && !pending->append(SlotValue(slot, value)))
             setOOM(cx);
+    }
+}
+
+void
+ScriptAnalysis::mergeAllExceptionTargets(JSContext *cx, SSAValue *values,
+                                         const Vector<uint32_t> &exceptionTargets)
+{
+    for (unsigned i = 0; i < exceptionTargets.length(); i++) {
+        Vector<SlotValue> *pending = getCode(exceptionTargets[i]).pendingValues;
+        for (unsigned i = 0; i < pending->length(); i++) {
+            const SlotValue &v = (*pending)[i];
+            if (trackSlot(v.slot))
+                mergeExceptionTarget(cx, values[v.slot], v.slot, exceptionTargets);
+        }
     }
 }
 

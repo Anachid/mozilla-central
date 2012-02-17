@@ -48,7 +48,6 @@
 #include "mozilla/Util.h"
 
 #include "jstypes.h"
-#include "jsstdint.h"
 #include "jsprf.h"
 #include "jsutil.h"
 #include "jsapi.h"
@@ -862,18 +861,23 @@ attr_identity(const JSXML *xmla, const JSXML *xmlb)
     return qname_identity(xmla->name, xmlb->name);
 }
 
-template<class T>
 void
-js_XMLArrayCursorTrace(JSTracer *trc, JSXMLArrayCursor<T> *cursor)
+js_XMLArrayCursorTrace(JSTracer *trc, JSXMLArrayCursor<JSXML> *cursor)
 {
     for (; cursor; cursor = cursor->next) {
         if (cursor->root)
-            Mark(trc, (const MarkablePtr<T> &)cursor->root, "cursor_root");
+            MarkXML(trc, (const HeapPtr<JSXML> &)cursor->root, "cursor_root");
     }
 }
 
-template void js_XMLArrayCursorTrace<JSXML>(JSTracer *trc, JSXMLArrayCursor<JSXML> *cursor);
-template void js_XMLArrayCursorTrace<JSObject>(JSTracer *trc, JSXMLArrayCursor<JSObject> *cursor);
+void
+js_XMLArrayCursorTrace(JSTracer *trc, JSXMLArrayCursor<JSObject> *cursor)
+{
+    for (; cursor; cursor = cursor->next) {
+        if (cursor->root)
+            MarkObject(trc, (const HeapPtr<JSObject> &)cursor->root, "cursor_root");
+    }
+}
 
 template<class T>
 static HeapPtr<T> *
@@ -1333,7 +1337,7 @@ ParseNodeToXML(Parser *parser, ParseNode *pn,
     JSXMLClass xml_class;
     int stackDummy;
 
-    if (!JS_CHECK_STACK_SIZE(cx->stackLimit, &stackDummy)) {
+    if (!JS_CHECK_STACK_SIZE(cx->runtime->nativeStackLimit, &stackDummy)) {
         ReportCompileErrorNumber(cx, &parser->tokenStream, pn, JSREPORT_ERROR,
                                  JSMSG_OVER_RECURSED);
         return NULL;
@@ -3384,8 +3388,10 @@ retry:
         return JS_TRUE;
 
     if (JSXML_HAS_VALUE(xml)) {
-        if (!EqualStrings(cx, xml->xml_value, vxml->xml_value, bp))
+        bool equal;
+        if (!EqualStrings(cx, xml->xml_value, vxml->xml_value, &equal))
             return JS_FALSE;
+        *bp = equal;
     } else if (xml->xml_kids.length != vxml->xml_kids.length) {
         *bp = JS_FALSE;
     } else {
@@ -3425,8 +3431,10 @@ retry:
                 vattr = XMLARRAY_MEMBER(&vxml->xml_attrs, j, JSXML);
                 if (!vattr)
                     continue;
-                if (!EqualStrings(cx, attr->xml_value, vattr->xml_value, bp))
+                bool equal;
+                if (!EqualStrings(cx, attr->xml_value, vattr->xml_value, &equal))
                     return JS_FALSE;
+                *bp = equal;
             }
         }
     }
@@ -5275,8 +5283,11 @@ js_TestXMLEquality(JSContext *cx, const Value &v1, const Value &v2, JSBool *bp)
                 if (ok) {
                     ok = (str = ToStringSlow(cx, ObjectValue(*obj))) &&
                          (vstr = ToString(cx, v));
-                    if (ok)
-                        ok = EqualStrings(cx, str, vstr, bp);
+                    if (ok) {
+                        bool equal;
+                        ok = EqualStrings(cx, str, vstr, &equal);
+                        *bp = equal;
+                    }
                     js_LeaveLocalRootScope(cx);
                 }
             } else {
@@ -5289,20 +5300,26 @@ js_TestXMLEquality(JSContext *cx, const Value &v1, const Value &v2, JSBool *bp)
             if (HasSimpleContent(xml)) {
                 ok = (str = ToString(cx, ObjectValue(*obj))) &&
                      (vstr = ToString(cx, v));
-                if (ok)
-                    ok = EqualStrings(cx, str, vstr, bp);
+                if (ok) {
+                    bool equal;
+                    ok = EqualStrings(cx, str, vstr, &equal);
+                    *bp = equal;
+                }
             } else if (JSVAL_IS_STRING(v) || JSVAL_IS_NUMBER(v)) {
                 str = ToString(cx, ObjectValue(*obj));
                 if (!str) {
                     ok = JS_FALSE;
                 } else if (JSVAL_IS_STRING(v)) {
-                    ok = EqualStrings(cx, str, JSVAL_TO_STRING(v), bp);
+                    bool equal;
+                    ok = EqualStrings(cx, str, JSVAL_TO_STRING(v), &equal);
+                    if (ok)
+                        *bp = equal;
                 } else {
                     ok = JS_ValueToNumber(cx, STRING_TO_JSVAL(str), &d);
                     if (ok) {
                         d2 = JSVAL_IS_INT(v) ? JSVAL_TO_INT(v)
                                              : JSVAL_TO_DOUBLE(v);
-                        *bp = JSDOUBLE_COMPARE(d, ==, d2, JS_FALSE);
+                        *bp = (d == d2);
                     }
                 }
             } else {
@@ -7706,8 +7723,7 @@ js_GetAnyName(JSContext *cx, jsid *idp)
             return false;
 
         v.setObject(*obj);
-        if (!js_SetReservedSlot(cx, global, JSProto_AnyName, v))
-            return false;
+        SetReservedSlot(global, JSProto_AnyName, v);
     }
     *idp = OBJECT_TO_JSID(&v.toObject());
     return true;

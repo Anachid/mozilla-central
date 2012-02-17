@@ -121,15 +121,15 @@ nsXBLDocGlobalObject::doCheckAccess(JSContext *cx, JSObject *obj, jsid id, PRUin
 
   // Make sure to actually operate on our object, and not some object further
   // down on the proto chain.
-  while (JS_GET_CLASS(cx, obj) != &nsXBLDocGlobalObject::gSharedGlobalClass) {
-    obj = ::JS_GetPrototype(cx, obj);
+  while (JS_GetClass(obj) != &nsXBLDocGlobalObject::gSharedGlobalClass) {
+    obj = ::JS_GetPrototype(obj);
     if (!obj) {
       ::JS_ReportError(cx, "Invalid access to a global object property.");
       return JS_FALSE;
     }
   }
 
-  nsresult rv = ssm->CheckPropertyAccess(cx, obj, JS_GET_CLASS(cx, obj)->name,
+  nsresult rv = ssm->CheckPropertyAccess(cx, obj, JS_GetClass(obj)->name,
                                          id, accessType);
   return NS_SUCCEEDED(rv);
 }
@@ -168,7 +168,7 @@ nsXBLDocGlobalObject_checkAccess(JSContext *cx, JSObject *obj, jsid id,
 static void
 nsXBLDocGlobalObject_finalize(JSContext *cx, JSObject *obj)
 {
-  nsISupports *nativeThis = (nsISupports*)JS_GetPrivate(cx, obj);
+  nsISupports *nativeThis = (nsISupports*)JS_GetPrivate(obj);
 
   nsCOMPtr<nsIScriptGlobalObject> sgo(do_QueryInterface(nativeThis));
 
@@ -305,7 +305,7 @@ nsXBLDocGlobalObject::EnsureScriptEnvironment(PRUint32 aLangID)
   if (mScriptContext)
     return NS_OK; // already initialized for this lang
   nsCOMPtr<nsIDOMScriptObjectFactory> factory = do_GetService(kDOMScriptObjectFactoryCID);
-  NS_ENSURE_TRUE(factory, nsnull);
+  NS_ENSURE_TRUE(factory, NS_OK);
 
   nsresult rv;
 
@@ -328,13 +328,13 @@ nsXBLDocGlobalObject::EnsureScriptEnvironment(PRUint32 aLangID)
 
   rv = xpc_CreateGlobalObject(cx, &gSharedGlobalClass, principal, nsnull,
                               false, &mJSObject, &compartment);
-  NS_ENSURE_SUCCESS(rv, nsnull);
+  NS_ENSURE_SUCCESS(rv, NS_OK);
 
   ::JS_SetGlobalObject(cx, mJSObject);
 
   // Add an owning reference from JS back to us. This'll be
   // released when the JSObject is finalized.
-  ::JS_SetPrivate(cx, mJSObject, this);
+  ::JS_SetPrivate(mJSObject, this);
   NS_ADDREF(this);
   return NS_OK;
 }
@@ -476,6 +476,7 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN(nsXBLDocumentInfo)
   if (tmp->mBindingTable) {
     tmp->mBindingTable->Enumerate(TraverseProtos, &cb);
   }
+  NS_CYCLE_COLLECTION_NOTE_EDGE_NAME(cb, "mGlobalObject");
   cb.NoteXPCOMChild(static_cast<nsIScriptGlobalObject*>(tmp->mGlobalObject));
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE_SCRIPT_OBJECTS
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
@@ -485,6 +486,33 @@ NS_IMPL_CYCLE_COLLECTION_TRACE_BEGIN(nsXBLDocumentInfo)
     tmp->mBindingTable->Enumerate(TraceProtos, &closure);
   }
 NS_IMPL_CYCLE_COLLECTION_TRACE_END
+
+static void
+UnmarkXBLJSObject(PRUint32 aLangID, void* aP, const char* aName, void* aClosure)
+{
+  if (aLangID == nsIProgrammingLanguage::JAVASCRIPT) {
+    xpc_UnmarkGrayObject(static_cast<JSObject*>(aP));
+  }
+}
+
+static bool
+UnmarkProtos(nsHashKey* aKey, void* aData, void* aClosure)
+{
+  nsXBLPrototypeBinding* proto = static_cast<nsXBLPrototypeBinding*>(aData);
+  proto->Trace(UnmarkXBLJSObject, nsnull);
+  return kHashEnumerateNext;
+}
+
+void
+nsXBLDocumentInfo::MarkInCCGeneration(PRUint32 aGeneration)
+{
+  if (mDocument) {
+    mDocument->MarkUncollectableForCCGeneration(aGeneration);
+  }
+  if (mBindingTable) {
+    mBindingTable->Enumerate(UnmarkProtos, nsnull);
+  }
+}
 
 NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(nsXBLDocumentInfo)
   NS_INTERFACE_MAP_ENTRY(nsIScriptGlobalObjectOwner)

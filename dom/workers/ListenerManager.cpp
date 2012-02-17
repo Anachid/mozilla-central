@@ -40,8 +40,9 @@
 
 #include "ListenerManager.h"
 
+#include "jsalloc.h"
 #include "jsapi.h"
-#include "jscntxt.h"
+#include "jsfriendapi.h"
 #include "js/Vector.h"
 
 #include "Events.h"
@@ -316,11 +317,30 @@ ListenerManager::GetEventListener(JSContext* aCx, JSString* aType,
   return true;
 }
 
+class ExternallyUsableContextAllocPolicy
+{
+    JSContext *const cx;
+
+  public:
+    ExternallyUsableContextAllocPolicy(JSContext *cx) : cx(cx) {}
+    JSContext *context() const { return cx; }
+    void *malloc_(size_t bytes) {
+        JSAutoRequest ar(cx);
+        return JS_malloc(cx, bytes);
+    }
+    void *realloc_(void *p, size_t oldBytes, size_t bytes) {
+        JSAutoRequest ar(cx);
+        return JS_realloc(cx, p, bytes);
+    }
+    void free_(void *p) { JS_free(cx, p); }
+    void reportAllocOverflow() const { JS_ReportAllocationOverflow(cx); }
+};
+
 bool
 ListenerManager::DispatchEvent(JSContext* aCx, JSObject* aTarget,
                                JSObject* aEvent, bool* aPreventDefaultCalled)
 {
-  if (!events::IsSupportedEventClass(aCx, aEvent)) {
+  if (!events::IsSupportedEventClass(aEvent)) {
     JS_ReportErrorNumber(aCx, js_GetErrorMessage, NULL,
                          JSMSG_INCOMPATIBLE_METHOD,
                          "EventTarget", "dispatchEvent", "Event object");
@@ -367,8 +387,8 @@ ListenerManager::DispatchEvent(JSContext* aCx, JSObject* aTarget,
     return true;
   }
 
-  js::ContextAllocPolicy ap(aCx);
-  js::Vector<jsval, 10, js::ContextAllocPolicy> listeners(ap);
+  ExternallyUsableContextAllocPolicy ap(aCx);
+  js::Vector<jsval, 10, ExternallyUsableContextAllocPolicy> listeners(ap);
 
   for (PRCList* elem = PR_NEXT_LINK(&collection->mListenerHead);
        elem != &collection->mListenerHead;
@@ -387,12 +407,10 @@ ListenerManager::DispatchEvent(JSContext* aCx, JSObject* aTarget,
     return true;
   }
 
-  if (!events::SetEventTarget(aCx, aEvent, aTarget)) {
-    return false;
-  }
+  events::SetEventTarget(aEvent, aTarget);
 
   for (size_t index = 0; index < listeners.length(); index++) {
-    if (events::EventImmediatePropagationStopped(aCx, aEvent)) {
+    if (events::EventImmediatePropagationStopped(aEvent)) {
       break;
     }
 
@@ -442,11 +460,9 @@ ListenerManager::DispatchEvent(JSContext* aCx, JSObject* aTarget,
     }
   }
 
-  if (!events::SetEventTarget(aCx, aEvent, NULL)) {
-    return false;
-  }
+  events::SetEventTarget(aEvent, NULL);
 
-  *aPreventDefaultCalled = events::EventWasCanceled(aCx, aEvent);
+  *aPreventDefaultCalled = events::EventWasCanceled(aEvent);
   return true;
 }
 

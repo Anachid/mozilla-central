@@ -46,7 +46,6 @@
 #include "mozilla/Util.h"
 
 #include "jstypes.h"
-#include "jsstdint.h"
 #include "jsutil.h"
 #include "jsapi.h"
 #include "jsarray.h"
@@ -123,7 +122,7 @@ js_GetArgsValue(JSContext *cx, StackFrame *fp, Value *vp)
 }
 
 js::ArgumentsObject *
-ArgumentsObject::create(JSContext *cx, uint32_t argc, JSObject &callee, StackFrame *fp)
+ArgumentsObject::create(JSContext *cx, uint32_t argc, JSObject &callee)
 {
     JS_ASSERT(argc <= StackSpace::ARGS_LENGTH_MAX);
 
@@ -166,7 +165,7 @@ ArgumentsObject::create(JSContext *cx, uint32_t argc, JSObject &callee, StackFra
     JS_ASSERT(UINT32_MAX > (uint64_t(argc) << PACKED_BITS_COUNT));
     argsobj.initInitialLength(argc);
     argsobj.initData(data);
-    argsobj.setStackFrame(strict ? NULL : fp);
+    argsobj.setStackFrame(NULL);
 
     JS_ASSERT(argsobj.numFixedSlots() >= NormalArgumentsObject::RESERVED_SLOTS);
     JS_ASSERT(argsobj.numFixedSlots() >= StrictArgumentsObject::RESERVED_SLOTS);
@@ -211,8 +210,7 @@ js_GetArgsObject(JSContext *cx, StackFrame *fp)
     if (fp->hasArgsObj())
         return &fp->argsObj();
 
-    ArgumentsObject *argsobj =
-        ArgumentsObject::create(cx, fp->numActualArgs(), fp->callee(), fp);
+    ArgumentsObject *argsobj = ArgumentsObject::create(cx, fp->numActualArgs(), fp->callee());
     if (!argsobj)
         return argsobj;
 
@@ -561,7 +559,8 @@ Class js::NormalArgumentsObjectClass = {
     "Arguments",
     JSCLASS_NEW_RESOLVE |
     JSCLASS_HAS_RESERVED_SLOTS(NormalArgumentsObject::RESERVED_SLOTS) |
-    JSCLASS_HAS_CACHED_PROTO(JSProto_Object),
+    JSCLASS_HAS_CACHED_PROTO(JSProto_Object) |
+    JSCLASS_FOR_OF_ITERATION,
     JS_PropertyStub,         /* addProperty */
     args_delProperty,
     JS_PropertyStub,         /* getProperty */
@@ -576,7 +575,15 @@ Class js::NormalArgumentsObjectClass = {
     NULL,                    /* construct   */
     NULL,                    /* xdrObject   */
     NULL,                    /* hasInstance */
-    args_trace
+    args_trace,
+    {
+        NULL,       /* equality    */
+        NULL,       /* outerObject */
+        NULL,       /* innerObject */
+        JS_ElementIteratorStub,
+        NULL,       /* unused      */
+        false,      /* isWrappedNative */
+    }
 };
 
 /*
@@ -588,7 +595,8 @@ Class js::StrictArgumentsObjectClass = {
     "Arguments",
     JSCLASS_NEW_RESOLVE |
     JSCLASS_HAS_RESERVED_SLOTS(StrictArgumentsObject::RESERVED_SLOTS) |
-    JSCLASS_HAS_CACHED_PROTO(JSProto_Object),
+    JSCLASS_HAS_CACHED_PROTO(JSProto_Object) |
+    JSCLASS_FOR_OF_ITERATION,
     JS_PropertyStub,         /* addProperty */
     args_delProperty,
     JS_PropertyStub,         /* getProperty */
@@ -603,7 +611,15 @@ Class js::StrictArgumentsObjectClass = {
     NULL,                    /* construct   */
     NULL,                    /* xdrObject   */
     NULL,                    /* hasInstance */
-    args_trace
+    args_trace,
+    {
+        NULL,       /* equality    */
+        NULL,       /* outerObject */
+        NULL,       /* innerObject */
+        JS_ElementIteratorStub,
+        NULL,       /* unused      */
+        false,      /* isWrappedNative */
+    }
 };
 
 namespace js {
@@ -1079,14 +1095,17 @@ fun_getProperty(JSContext *cx, JSObject *obj, jsid id, Value *vp)
 
     /* Find fun's top-most activation record. */
     StackFrame *fp = js_GetTopStackFrame(cx, FRAME_EXPAND_NONE);
+    for (; fp; fp = fp->prev()) {
+        if (!fp->isFunctionFrame() || fp->isEvalFrame())
+            continue;
+        Value callee;
+        if (!fp->getValidCalleeObject(cx, &callee))
+            return false;
+        if (&callee.toObject() == fun)
+            break;
+    }
     if (!fp)
         return true;
-
-    while (!fp->isFunctionFrame() || &fp->callee() != fun || fp->isEvalFrame()) {
-        fp = fp->prev();
-        if (!fp)
-            return true;
-    }
 
 #ifdef JS_METHODJIT
     if (JSID_IS_ATOM(id, cx->runtime->atomState.callerAtom) && fp && fp->prev()) {
@@ -1096,9 +1115,10 @@ fun_getProperty(JSContext *cx, JSObject *obj, jsid id, Value *vp)
          * to recover its callee object.
          */
         JSInlinedSite *inlined;
-        fp->prev()->pcQuadratic(cx->stack, fp, &inlined);
+        jsbytecode *prevpc = fp->prev()->pcQuadratic(cx->stack, fp, &inlined);
         if (inlined) {
-            JSFunction *fun = fp->prev()->jit()->inlineFrames()[inlined->inlineIndex].fun;
+            mjit::JITChunk *chunk = fp->prev()->jit()->chunk(prevpc);
+            JSFunction *fun = chunk->inlineFrames()[inlined->inlineIndex].fun;
             fun->script()->uninlineable = true;
             MarkTypeObjectFlags(cx, fun, OBJECT_FLAG_UNINLINEABLE);
         }
@@ -1112,7 +1132,19 @@ fun_getProperty(JSContext *cx, JSObject *obj, jsid id, Value *vp)
             return false;
         }
 
-        return js_GetArgsValue(cx, fp, vp);
+        /*
+         * Purposefully disconnect the returned arguments object from the frame
+         * by always creating a new copy that does not alias formal parameters.
+         * This allows function-local analysis to determine that formals are
+         * not aliased and generally simplifies arguments objects.
+         */
+        ArgumentsObject *argsobj = ArgumentsObject::create(cx, fp->numActualArgs(), fp->callee());
+        if (!argsobj)
+            return false;
+
+        fp->forEachCanonicalActualArg(PutArg(cx->compartment, argsobj->data()->slots));
+        *vp = ObjectValue(*argsobj);
+        return true;
     }
 
     if (JSID_IS_ATOM(id, cx->runtime->atomState.callerAtom)) {
@@ -1212,8 +1244,8 @@ ResolveInterpretedFunctionPrototype(JSContext *cx, JSObject *obj)
      * Make the prototype object an instance of Object with the same parent
      * as the function object itself.
      */
-    JSObject *objProto;
-    if (!js_GetClassPrototype(cx, obj->getParent(), JSProto_Object, &objProto))
+    JSObject *objProto = obj->global().getOrCreateObjectPrototype(cx);
+    if (!objProto)
         return NULL;
     JSObject *proto = NewObjectWithGivenProto(cx, &ObjectClass, objProto, NULL);
     if (!proto || !proto->setSingletonType(cx))
@@ -1435,7 +1467,7 @@ JSFunction::trace(JSTracer *trc)
     }
 
     if (atom)
-        MarkAtom(trc, atom, "atom");
+        MarkStringUnbarriered(trc, atom, "atom");
 
     if (isInterpreted()) {
         if (script())
@@ -1456,6 +1488,14 @@ fun_finalize(JSContext *cx, JSObject *obj)
 {
     if (obj->toFunction()->isFlatClosure())
         obj->toFunction()->finalizeUpvars();
+}
+
+size_t
+JSFunction::sizeOfMisc(JSMallocSizeOfFun mallocSizeOf) const
+{
+    return (isFlatClosure() && hasFlatClosureUpvars()) ?
+           mallocSizeOf(getFlatClosureUpvars()) :
+           0;
 }
 
 /*
@@ -1596,7 +1636,7 @@ js_fun_call(JSContext *cx, uintN argc, Value *vp)
     /* Push fval, thisv, and the args. */
     args.calleev() = fval;
     args.thisv() = thisv;
-    memcpy(args.array(), argv, argc * sizeof *argv);
+    PodCopy(args.array(), argv, argc);
 
     bool ok = Invoke(cx, args);
     *vp = args.rval();
@@ -1770,7 +1810,7 @@ CallOrConstructBoundFunction(JSContext *cx, uintN argc, Value *vp)
     /* 15.3.4.5.1, 15.3.4.5.2 step 4. */
     for (uintN i = 0; i < argslen; i++)
         args[i] = fun->getBoundFunctionArgument(i);
-    memcpy(args.array() + argslen, vp + 2, argc * sizeof(Value));
+    PodCopy(args.array() + argslen, vp + 2, argc);
 
     /* 15.3.4.5.1, 15.3.4.5.2 step 5. */
     args.calleev().setObject(*target);

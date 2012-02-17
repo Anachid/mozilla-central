@@ -49,35 +49,31 @@
 
 class XPCCallContext;
 
-#define XPC_QS_NULL_INDEX  ((size_t) -1)
+#define XPC_QS_NULL_INDEX  ((uint16_t) -1)
 
 struct xpc_qsPropertySpec {
-    const char *name;
+    uint16_t name_index;
     JSPropertyOp getter;
     JSStrictPropertyOp setter;
 };
 
 struct xpc_qsFunctionSpec {
-    const char *name;
+    uint16_t name_index;
+    uint16_t arity;
     JSNative native;
-    uintN arity;
-};
-
-struct xpc_qsTraceableSpec {
-    const char *name;
-    JSNative native;
-    uintN arity;
 };
 
 /** A table mapping interfaces to quick stubs. */
 struct xpc_qsHashEntry {
     nsID iid;
-    const xpc_qsPropertySpec *properties;
-    const xpc_qsFunctionSpec *functions;
+    uint16_t prop_index;
+    uint16_t n_props;
+    uint16_t func_index;
+    uint16_t n_funcs;
     // These last two fields index to other entries in the same table.
     // XPC_QS_NULL_ENTRY indicates there are no more entries in the chain.
-    size_t parentInterface;
-    size_t chain;
+    uint16_t parentInterface;
+    uint16_t chain;
 };
 
 inline nsISupports*
@@ -164,7 +160,10 @@ public:
 JSBool
 xpc_qsDefineQuickStubs(JSContext *cx, JSObject *proto, uintN extraFlags,
                        PRUint32 ifacec, const nsIID **interfaces,
-                       PRUint32 tableSize, const xpc_qsHashEntry *table);
+                       PRUint32 tableSize, const xpc_qsHashEntry *table,
+                       const xpc_qsPropertySpec *propspecs,
+                       const xpc_qsFunctionSpec *funcspecs,
+                       const char *stringTable);
 
 /** Raise an exception on @a cx and return false. */
 JSBool
@@ -198,7 +197,7 @@ xpc_qsThrowMethodFailed(JSContext *cx, nsresult rv, jsval *vp);
 JSBool
 xpc_qsThrowMethodFailedWithCcx(XPCCallContext &ccx, nsresult rv);
 
-void
+bool
 xpc_qsThrowMethodFailedWithDetails(JSContext *cx, nsresult rv,
                                    const char *ifaceName,
                                    const char *memberName);
@@ -441,7 +440,6 @@ xpc_qsStringToJsstring(JSContext *cx, nsString &str, JSString **rval);
 nsresult
 getWrapper(JSContext *cx,
            JSObject *obj,
-           JSObject *callee,
            XPCWrappedNative **wrapper,
            JSObject **cur,
            XPCWrappedNativeTearOff **tearoff);
@@ -477,7 +475,6 @@ template <class T>
 inline JSBool
 xpc_qsUnwrapThis(JSContext *cx,
                  JSObject *obj,
-                 JSObject *callee,
                  T **ppThis,
                  nsISupports **pThisRef,
                  jsval *pThisVal,
@@ -486,7 +483,7 @@ xpc_qsUnwrapThis(JSContext *cx,
 {
     XPCWrappedNative *wrapper;
     XPCWrappedNativeTearOff *tearoff;
-    nsresult rv = getWrapper(cx, obj, callee, &wrapper, &obj, &tearoff);
+    nsresult rv = getWrapper(cx, obj, &wrapper, &obj, &tearoff);
     if (NS_SUCCEEDED(rv))
         rv = castNative(cx, wrapper, obj, tearoff, NS_GET_TEMPLATE_IID(T),
                         reinterpret_cast<void **>(ppThis), pThisRef, pThisVal,
@@ -503,7 +500,6 @@ xpc_qsUnwrapThis(JSContext *cx,
 inline nsISupports*
 castNativeFromWrapper(JSContext *cx,
                       JSObject *obj,
-                      JSObject *callee,
                       PRUint32 interfaceBit,
                       nsISupports **pRef,
                       jsval *pVal,
@@ -514,14 +510,14 @@ castNativeFromWrapper(JSContext *cx,
     XPCWrappedNativeTearOff *tearoff;
     JSObject *cur;
 
-    if (!callee && IS_WRAPPER_CLASS(js::GetObjectClass(obj))) {
+    if (IS_WRAPPER_CLASS(js::GetObjectClass(obj))) {
         cur = obj;
         wrapper = IS_WN_WRAPPER_OBJECT(cur) ?
                   (XPCWrappedNative*)xpc_GetJSPrivate(obj) :
                   nsnull;
         tearoff = nsnull;
     } else {
-        *rv = getWrapper(cx, obj, callee, &wrapper, &cur, &tearoff);
+        *rv = getWrapper(cx, obj, &wrapper, &cur, &tearoff);
         if (NS_FAILED(*rv))
             return nsnull;
     }
@@ -617,7 +613,7 @@ castNativeArgFromWrapper(JSContext *cx,
     if (!src)
         return nsnull;
 
-    return castNativeFromWrapper(cx, src, nsnull, bit, pArgRef, vp, nsnull, rv);
+    return castNativeFromWrapper(cx, src, bit, pArgRef, vp, nsnull, rv);
 }
 
 inline nsWrapperCache*

@@ -61,6 +61,8 @@
 #include "nsWindowDbg.h"
 #include "cairo.h"
 #include "nsITimer.h"
+#include "mozilla/TimeStamp.h"
+
 #ifdef CAIRO_HAS_D2D_SURFACE
 #include "gfxD2DSurface.h"
 #endif
@@ -94,6 +96,8 @@ class imgIContainer;
 
 class nsWindow : public nsBaseWidget
 {
+  typedef mozilla::TimeStamp TimeStamp;
+  typedef mozilla::TimeDuration TimeDuration;
   typedef mozilla::widget::WindowHook WindowHook;
 #if MOZ_WINSDK_TARGETVER >= MOZ_NTDDI_WIN7
   typedef mozilla::widget::TaskbarWindowPreview TaskbarWindowPreview;
@@ -142,12 +146,10 @@ public:
   virtual nsresult        ConfigureChildren(const nsTArray<Configuration>& aConfigurations);
   NS_IMETHOD              MakeFullScreen(bool aFullScreen);
   NS_IMETHOD              HideWindowChrome(bool aShouldHide);
-  NS_IMETHOD              Invalidate(bool aIsSynchronous, 
-                                     bool aEraseBackground = false,
+  NS_IMETHOD              Invalidate(bool aEraseBackground = false,
                                      bool aUpdateNCArea = false,
                                      bool aIncludeChildren = false);
-  NS_IMETHOD              Invalidate(const nsIntRect & aRect, bool aIsSynchronous);
-  NS_IMETHOD              Update();
+  NS_IMETHOD              Invalidate(const nsIntRect & aRect);
   virtual void*           GetNativeData(PRUint32 aDataType);
   virtual void            FreeNativeData(void * data, PRUint32 aDataType);
   NS_IMETHOD              SetTitle(const nsAString& aTitle);
@@ -480,9 +482,6 @@ protected:
   nsIntRegion             GetRegionToPaint(bool aForceFullRepaint, 
                                            PAINTSTRUCT ps, HDC aDC);
   static void             ActivateOtherWindowHelper(HWND aWnd);
-#ifdef ACCESSIBILITY
-  static STDMETHODIMP_(LRESULT) LresultFromObject(REFIID riid, WPARAM wParam, LPUNKNOWN pAcc);
-#endif // ACCESSIBILITY
   void                    ClearCachedResources();
 
   nsPopupType PopupType() { return mPopupType; }
@@ -611,11 +610,9 @@ protected:
   bool                  mHasTaskbarIconBeenCreated;
 #endif
 
-#ifdef ACCESSIBILITY
-  static BOOL           sIsAccessibilityOn;
-  static HINSTANCE      sAccLib;
-  static LPFNLRESULTFROMOBJECT sLresultFromObject;
-#endif // ACCESSIBILITY
+  // The point in time at which the last paint completed. We use this to avoid
+  //  painting too rapidly in response to frequent input events.
+  TimeStamp mLastPaintEndTime;
 
   // sRedirectedKeyDown is WM_KEYDOWN message or WM_SYSKEYDOWN message which
   // was reirected to SendInput() API by OnKeyDown().

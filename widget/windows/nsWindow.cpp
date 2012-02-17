@@ -283,14 +283,6 @@ bool            nsWindow::sAllowD3D9              = false;
 
 TriStateBool nsWindow::sHasBogusPopupsDropShadowOnMultiMonitor = TRI_UNKNOWN;
 
-#ifdef ACCESSIBILITY
-BOOL            nsWindow::sIsAccessibilityOn      = FALSE;
-// Accessibility wm_getobject handler
-HINSTANCE       nsWindow::sAccLib                 = 0;
-LPFNLRESULTFROMOBJECT 
-                nsWindow::sLresultFromObject      = 0;
-#endif // ACCESSIBILITY
-
 // Used in OOPP plugin focus processing.
 const PRUnichar* kOOPPPluginFocusEventId   = L"OOPP Plugin Focus Widget Event";
 PRUint32        nsWindow::sOOPPPluginFocusEvent   =
@@ -341,10 +333,16 @@ static NS_DEFINE_CID(kCClipboardCID, NS_CLIPBOARD_CID);
 // General purpose user32.dll hook object
 static WindowsDllInterceptor sUser32Intercept;
 
-// 2 pixel offset for eTransparencyBorderlessGlass which equals
-// the size of the default window border Windows paints.
+// 2 pixel offset for eTransparencyBorderlessGlass which equals the size of
+// the default window border Windows paints. Glass will be extended inward
+// this distance to remove the border.
 static const PRInt32 kGlassMarginAdjustment = 2;
 
+// When the client area is extended out into the default window frame area,
+// this is the minimum amount of space along the edge of resizable windows
+// we will always display a resize cursor in, regardless of the underlying
+// content.
+static const PRInt32 kResizableBorderMinSize = 3;
 
 // We should never really try to accelerate windows bigger than this. In some
 // cases this might lead to no D3D9 acceleration where we could have had it
@@ -409,6 +407,7 @@ nsWindow::nsWindow() : nsBaseWidget()
   mLastKeyboardLayout   = 0;
   mAssumeWheelIsZoomUntil = 0;
   mBlurSuppressLevel    = 0;
+  mLastPaintEndTime     = TimeStamp::Now();
 #ifdef MOZ_XUL
   mTransparentSurface   = nsnull;
   mMemoryDC             = nsnull;
@@ -1235,8 +1234,12 @@ NS_METHOD nsWindow::Show(bool bState)
   }
   
 #ifdef MOZ_XUL
-  if (!wasVisible && bState)
-    Invalidate(syncInvalidate);
+  if (!wasVisible && bState) {
+    Invalidate();
+    if (syncInvalidate) {
+      ::UpdateWindow(mWnd);
+    }
+  }
 #endif
 
   return NS_OK;
@@ -1270,7 +1273,8 @@ NS_METHOD nsWindow::IsVisible(bool & bState)
 // transparency. These routines are called on size and move operations.
 void nsWindow::ClearThemeRegion()
 {
-  if (nsUXThemeData::sIsVistaOrLater && !HasGlass() &&
+  if (WinUtils::GetWindowsVersion() >= WinUtils::VISTA_VERSION &&
+      !HasGlass() &&
       (mWindowType == eWindowType_popup && !IsPopupWithTitleBar() &&
        (mPopupType == ePopupTypeTooltip || mPopupType == ePopupTypePanel))) {
     SetWindowRgn(mWnd, NULL, false);
@@ -1284,7 +1288,8 @@ void nsWindow::SetThemeRegion()
   // so default constants are used for part and state. At some point we might need part and
   // state values from nsNativeThemeWin's GetThemePartAndState, but currently windows that
   // change shape based on state haven't come up.
-  if (nsUXThemeData::sIsVistaOrLater && !HasGlass() &&
+  if (WinUtils::GetWindowsVersion() >= WinUtils::VISTA_VERSION &&
+      !HasGlass() &&
       (mWindowType == eWindowType_popup && !IsPopupWithTitleBar() &&
        (mPopupType == ePopupTypeTooltip || mPopupType == ePopupTypePanel))) {
     HRGN hRgn = nsnull;
@@ -1442,7 +1447,7 @@ NS_METHOD nsWindow::Resize(PRInt32 aWidth, PRInt32 aHeight, bool aRepaint)
   }
 
   if (aRepaint)
-    Invalidate(false);
+    Invalidate();
 
   return NS_OK;
 }
@@ -1481,7 +1486,7 @@ NS_METHOD nsWindow::Resize(PRInt32 aX, PRInt32 aY, PRInt32 aWidth, PRInt32 aHeig
   }
 
   if (aRepaint)
-    Invalidate(false);
+    Invalidate();
 
   return NS_OK;
 }
@@ -1972,7 +1977,7 @@ nsWindow::ResetLayout()
   OnResize(evRect);
 
   // Invalidate and update
-  Invalidate(false);
+  Invalidate();
 }
 
 // Internally track the caption status via a window property. Required
@@ -2031,49 +2036,91 @@ nsWindow::UpdateNonClientMargins(PRInt32 aSizeMode, bool aReflowWindow)
 
   mNonClientOffset.top = mNonClientOffset.bottom =
     mNonClientOffset.left = mNonClientOffset.right = 0;
+  mCaptionHeight = mVertResizeMargin = mHorResizeMargin = 0;
 
   if (aSizeMode == -1)
     aSizeMode = mSizeMode;
 
   if (aSizeMode == nsSizeMode_Minimized ||
       aSizeMode == nsSizeMode_Fullscreen) {
-    mCaptionHeight = mVertResizeMargin = mHorResizeMargin = 0;
     return true;
   }
 
-  // Note, for maximized windows, we need to continue to offset the client by
-  // thick frame margins of a normal window, since windows expects this
-  // in it's DwmDefWndProc hit testing.
-  mCaptionHeight = GetSystemMetrics(SM_CYCAPTION);
+  bool hasCaption = (mBorderStyle & (eBorderStyle_all |
+                                     eBorderStyle_title |
+                                     eBorderStyle_menu |
+                                     eBorderStyle_default)) > 0 ? true : false;
+
+  if (hasCaption)
+    mCaptionHeight = GetSystemMetrics(SM_CYCAPTION);
   mHorResizeMargin = GetSystemMetrics(SM_CXFRAME);
   mVertResizeMargin = GetSystemMetrics(SM_CYFRAME);
-
   mCaptionHeight += mVertResizeMargin;
 
-  // If a margin value is 0, set the offset to the default size of the frame.
-  // If a margin is -1, leave as default, and if a margin > 0, set the offset
-  // so that the frame size is equal to the margin value.
+  // Custom margin offset calculations for the chrome margin attribute on a
+  // window. The offsets calculated here are added to the client area in the
+  // WM_NCCALCSIZE event:
+  // -1 - leave the default frame in place
+  //  0 - remove the frame, our frame offset equals the default frame size
+  // >0 - frame size equals (default frame size - margin value) with the
+  //      restriction that the offset <= default frame size.
   if (!mNonClientMargins.top)
     mNonClientOffset.top = mCaptionHeight;
   else if (mNonClientMargins.top > 0)
-    mNonClientOffset.top = mCaptionHeight - mNonClientMargins.top;
+    mNonClientOffset.top = NS_MIN(mCaptionHeight, mNonClientMargins.top);
 
   if (!mNonClientMargins.left)
     mNonClientOffset.left = mHorResizeMargin;
   else if (mNonClientMargins.left > 0)
-    mNonClientOffset.left = mHorResizeMargin - mNonClientMargins.left;
+    mNonClientOffset.left = NS_MIN(mHorResizeMargin, mNonClientMargins.left);
  
   if (!mNonClientMargins.right)
     mNonClientOffset.right = mHorResizeMargin;
   else if (mNonClientMargins.right > 0)
-    mNonClientOffset.right = mHorResizeMargin - mNonClientMargins.right;
+    mNonClientOffset.right = NS_MIN(mHorResizeMargin, mNonClientMargins.right);
 
   if (!mNonClientMargins.bottom)
     mNonClientOffset.bottom = mVertResizeMargin;
   else if (mNonClientMargins.bottom > 0)
-    mNonClientOffset.bottom = mVertResizeMargin - mNonClientMargins.bottom;
+    mNonClientOffset.bottom = NS_MIN(mVertResizeMargin, mNonClientMargins.bottom);
+
+  // Disable chrome margins > 0 in two cases:
+  // - For non-glass desktops: The window frame is painted with textures that
+  //   require the entire space of the default frame. We allow a full frame or
+  //   no frame at all.
+  // - For maximized windows: Windows positions maximized windows such that the
+  //   outer bounds sit off screen a distance equal to the standard frame size.
+  if(!nsUXThemeData::CheckForCompositor() || aSizeMode == nsSizeMode_Maximized) {
+    if (mNonClientMargins.top > 0)
+      mNonClientOffset.top = 0;
+    if (mNonClientMargins.bottom > 0)
+      mNonClientOffset.bottom = 0;
+    if (mNonClientMargins.left > 0)
+      mNonClientOffset.left = 0;
+    if (mNonClientMargins.right > 0)
+      mNonClientOffset.right = 0;
+  }
 
   if (aSizeMode == nsSizeMode_Maximized) {
+    // For chrome margins = 0 on maximized windows, Windows places the bounds
+    // off screen a distance equal to the standard frame size. Remove this
+    // area from our expanded client area.
+    if (!mNonClientMargins.bottom)
+      mNonClientOffset.bottom = 0;
+    if (!mNonClientMargins.left)
+      mNonClientOffset.left = 0;
+    if (!mNonClientMargins.right)
+      mNonClientOffset.right = 0;
+
+    // This should be (mCaptionHeight - mVertResizeMargin). But if we offset
+    // the client area by just SM_CYCAPTION (placing the top of the client
+    // area level with the visible screen) Windows dwm def proc fails to pick
+    // up mouse hover and clicks on the glass control buttons. To compensate,
+    // we position the client area off screen by mVertResizeMargin, and add
+    // widget padding in nsNativeThemeWin::GetWidgetPadding().
+    if (!mNonClientMargins.top)
+      mNonClientOffset.top = mCaptionHeight;
+
     // Address an issue with auto-hide taskbars which fall behind the window.
     // Ensure a 1 pixel margin at the bottom of the monitor so that unhiding
     // the taskbar works properly.
@@ -2608,8 +2655,7 @@ NS_IMETHODIMP nsWindow::HideWindowChrome(bool aShouldHide)
  **************************************************************/
 
 // Invalidate this component visible area
-NS_METHOD nsWindow::Invalidate(bool aIsSynchronous, 
-                               bool aEraseBackground, 
+NS_METHOD nsWindow::Invalidate(bool aEraseBackground, 
                                bool aUpdateNCArea,
                                bool aIncludeChildren)
 {
@@ -2621,7 +2667,6 @@ NS_METHOD nsWindow::Invalidate(bool aIsSynchronous,
   debug_DumpInvalidate(stdout,
                        this,
                        nsnull,
-                       aIsSynchronous,
                        nsCAutoString("noname"),
                        (PRInt32) mWnd);
 #endif // WIDGET_DEBUG_OUTPUT
@@ -2629,9 +2674,6 @@ NS_METHOD nsWindow::Invalidate(bool aIsSynchronous,
   DWORD flags = RDW_INVALIDATE;
   if (aEraseBackground) {
     flags |= RDW_ERASE;
-  }
-  if (aIsSynchronous) {
-    flags |= RDW_UPDATENOW;
   }
   if (aUpdateNCArea) {
     flags |= RDW_FRAME;
@@ -2645,7 +2687,7 @@ NS_METHOD nsWindow::Invalidate(bool aIsSynchronous,
 }
 
 // Invalidate this component visible area
-NS_METHOD nsWindow::Invalidate(const nsIntRect & aRect, bool aIsSynchronous)
+NS_METHOD nsWindow::Invalidate(const nsIntRect & aRect)
 {
   if (mWnd)
   {
@@ -2653,7 +2695,6 @@ NS_METHOD nsWindow::Invalidate(const nsIntRect & aRect, bool aIsSynchronous)
     debug_DumpInvalidate(stdout,
                          this,
                          &aRect,
-                         aIsSynchronous,
                          nsCAutoString("noname"),
                          (PRInt32) mWnd);
 #endif // WIDGET_DEBUG_OUTPUT
@@ -2666,10 +2707,6 @@ NS_METHOD nsWindow::Invalidate(const nsIntRect & aRect, bool aIsSynchronous)
     rect.bottom = aRect.y + aRect.height;
 
     VERIFY(::InvalidateRect(mWnd, &rect, FALSE));
-
-    if (aIsSynchronous) {
-      VERIFY(::UpdateWindow(mWnd));
-    }
   }
   return NS_OK;
 }
@@ -2709,7 +2746,7 @@ nsWindow::MakeFullScreen(bool aFullScreen)
 
   if (visible) {
     Show(true);
-    Invalidate(false);
+    Invalidate();
   }
 
   // Notify the taskbar that we have exited full screen mode.
@@ -2722,26 +2759,6 @@ nsWindow::MakeFullScreen(bool aFullScreen)
   event.mSizeMode = mSizeMode;
   InitEvent(event);
   DispatchWindowEvent(&event);
-
-  return rv;
-}
-
-/**************************************************************
- *
- * SECTION: nsIWidget::Update
- *
- * Force a synchronous repaint of the window.
- *
- **************************************************************/
-
-NS_IMETHODIMP nsWindow::Update()
-{
-  nsresult rv = NS_OK;
-
-  // updates can come through for windows no longer holding an mWnd during
-  // deletes triggered by JavaScript in buttons with mouse feedback
-  if (mWnd)
-    VERIFY(::UpdateWindow(mWnd));
 
   return rv;
 }
@@ -3709,9 +3726,11 @@ void nsWindow::DispatchPendingEvents()
     --recursionBlocker;
   }
 
-  // Quickly check to see if there are any
-  // paint events pending.
-  if (::GetQueueStatus(QS_PAINT)) {
+  // Quickly check to see if there are any paint events pending,
+  // but only dispatch them if it has been long enough since the
+  // last paint completed.
+  if (::GetQueueStatus(QS_PAINT) &&
+      ((TimeStamp::Now() - mLastPaintEndTime).ToMilliseconds() >= 50)) {
     // Find the top level window.
     HWND topWnd = WinUtils::GetTopLevelHWND(mWnd);
 
@@ -4628,7 +4647,7 @@ bool nsWindow::ProcessMessage(UINT msg, WPARAM &wParam, LPARAM &lParam,
 
       // Invalidate the window so that the repaint will
       // pick up the new theme.
-      Invalidate(true, true, true, true);
+      Invalidate(true, true, true);
     }
     break;
 
@@ -5175,21 +5194,10 @@ bool nsWindow::ProcessMessage(UINT msg, WPARAM &wParam, LPARAM &lParam,
       if (sJustGotActivate) {
         result = DispatchFocusToTopLevelWindow(NS_ACTIVATE);
       }
-
-#ifdef ACCESSIBILITY
-      if (nsWindow::sIsAccessibilityOn) {
-        // Create it for the first time so that it can start firing events
-        nsAccessible *rootAccessible = GetRootAccessible();
-      }
-#endif
       break;
 
     case WM_KILLFOCUS:
-      if (sJustGotDeactivate || !wParam) {
-        // Note: wParam is FALSE when the window has lost focus. Sometimes
-        // We can receive WM_KILLFOCUS with !wParam while changing to
-        // full-screen mode and we won't receive an WM_ACTIVATE/WA_INACTIVE
-        // message, so inform the focus manager that we've lost focus now.
+      if (sJustGotDeactivate) {
         result = DispatchFocusToTopLevelWindow(NS_DEACTIVATE);
       }
       break;
@@ -5307,7 +5315,7 @@ bool nsWindow::ProcessMessage(UINT msg, WPARAM &wParam, LPARAM &lParam,
     BroadcastMsg(mWnd, WM_DWMCOMPOSITIONCHANGED);
     DispatchStandardEvent(NS_THEMECHANGED);
     UpdateGlass();
-    Invalidate(true, true, true, true);
+    Invalidate(true, true, true);
     break;
 #endif
 
@@ -5543,6 +5551,11 @@ BOOL CALLBACK nsWindow::BroadcastMsg(HWND aTopWindow, LPARAM aMsg)
 PRInt32
 nsWindow::ClientMarginHitTestPoint(PRInt32 mx, PRInt32 my)
 {
+  if (mSizeMode == nsSizeMode_Minimized ||
+      mSizeMode == nsSizeMode_Fullscreen) {
+    return HTCLIENT;
+  }
+
   // Calculations are done in screen coords
   RECT winRect;
   GetWindowRect(mWnd, &winRect);
@@ -5560,72 +5573,90 @@ nsWindow::ClientMarginHitTestPoint(PRInt32 mx, PRInt32 my)
 
   PRInt32 testResult = HTCLIENT;
 
+  bool isResizable = (mBorderStyle & (eBorderStyle_all |
+                                      eBorderStyle_resizeh |
+                                      eBorderStyle_default)) > 0 ? true : false;
+  if (mSizeMode == nsSizeMode_Maximized)
+    isResizable = false;
+
   bool top    = false;
   bool bottom = false;
   bool left   = false;
   bool right  = false;
 
-  if (my >= winRect.top && my <
-      (winRect.top + mVertResizeMargin + (mCaptionHeight - mNonClientOffset.top)))
+  int topOffset = NS_MAX(mCaptionHeight - mNonClientOffset.top,
+                         kResizableBorderMinSize);
+  int bottomOffset = NS_MAX(mVertResizeMargin - mNonClientOffset.bottom,
+                            kResizableBorderMinSize);
+  int topBounds = winRect.top + topOffset;
+  int bottomBounds = winRect.bottom - bottomOffset;
+
+  if (my >= winRect.top && my < topBounds)
     top = true;
-  else if (my < winRect.bottom && my >= (winRect.bottom - mVertResizeMargin))
+  else if (my <= winRect.bottom && my > bottomBounds)
     bottom = true;
 
-  if (mx >= winRect.left && mx < (winRect.left +
-                                  (bottom ? (2*mHorResizeMargin) : mHorResizeMargin)))
+  int leftOffset = NS_MAX(mHorResizeMargin - mNonClientOffset.left,
+                          kResizableBorderMinSize);
+  int rightOffset = NS_MAX(mHorResizeMargin - mNonClientOffset.right,
+                           kResizableBorderMinSize);
+  // (the 2x case here doubles the resize area for corners)
+  int leftBounds = winRect.left +
+                   (bottom ? (2*leftOffset) : leftOffset);
+  int rightBounds = winRect.right -
+                    (bottom ? (2*rightOffset) : rightOffset);
+
+  if (mx >= winRect.left && mx < leftBounds)
     left = true;
-  else if (mx < winRect.right && mx >= (winRect.right -
-                                        (bottom ? (2*mHorResizeMargin) : mHorResizeMargin)))
+  else if (mx <= winRect.right && mx > rightBounds)
     right = true;
 
-  if (top) {
-    testResult = HTTOP;
-    if (left)
-      testResult = HTTOPLEFT;
-    else if (right)
-      testResult = HTTOPRIGHT;
-  } else if (bottom) {
-    testResult = HTBOTTOM;
-    if (left)
-      testResult = HTBOTTOMLEFT;
-    else if (right)
-      testResult = HTBOTTOMRIGHT;
+  if (isResizable) {
+    if (top) {
+      testResult = HTTOP;
+      if (left)
+        testResult = HTTOPLEFT;
+      else if (right)
+        testResult = HTTOPRIGHT;
+    } else if (bottom) {
+      testResult = HTBOTTOM;
+      if (left)
+        testResult = HTBOTTOMLEFT;
+      else if (right)
+        testResult = HTBOTTOMRIGHT;
+    } else {
+      if (left)
+        testResult = HTLEFT;
+      if (right)
+        testResult = HTRIGHT;
+    }
   } else {
-    if (left)
-      testResult = HTLEFT;
-    if (right)
-      testResult = HTRIGHT;
+    if (top)
+      testResult = HTCAPTION;
+    else if (bottom || left || right)
+      testResult = HTBORDER;
   }
 
   bool contentOverlap = true;
 
-  if (mSizeMode == nsSizeMode_Maximized) {
-    // There's no HTTOP in maximized state (bug 575493)
-    if (testResult == HTTOP) {
-      testResult = HTCAPTION;
-    }
-  } else {
-    PRInt32 leftMargin   = mNonClientMargins.left   == -1 ? mHorResizeMargin  : mNonClientMargins.left;
-    PRInt32 rightMargin  = mNonClientMargins.right  == -1 ? mHorResizeMargin  : mNonClientMargins.right;
-    PRInt32 topMargin    = mNonClientMargins.top    == -1 ? mVertResizeMargin : mNonClientMargins.top;
-    PRInt32 bottomMargin = mNonClientMargins.bottom == -1 ? mVertResizeMargin : mNonClientMargins.bottom;
-
-    contentOverlap = mx >= winRect.left + leftMargin &&
-                     mx <= winRect.right - rightMargin &&
-                     my >= winRect.top + topMargin &&
-                     my <= winRect.bottom - bottomMargin;
+  if (mSizeMode != nsSizeMode_Maximized) {
+    contentOverlap = mx >= winRect.left + leftOffset &&
+                     mx <= winRect.right - rightOffset &&
+                     my >= winRect.top + topOffset &&
+                     my <= winRect.bottom - bottomOffset;
   }
 
   if (!sIsInMouseCapture &&
       contentOverlap &&
       (testResult == HTCLIENT ||
        testResult == HTTOP ||
+       testResult == HTBORDER ||
        testResult == HTTOPLEFT ||
        testResult == HTCAPTION)) {
     LPARAM lParam = MAKELPARAM(mx, my);
     LPARAM lParamClient = lParamToClient(lParam);
     bool result = DispatchMouseEvent(NS_MOUSE_MOZHITTEST, 0, lParamClient,
-                                       false, nsMouseEvent::eLeftButton, MOUSE_INPUT_SOURCE());
+                                     false, nsMouseEvent::eLeftButton, MOUSE_INPUT_SOURCE());
     if (result) {
       // The mouse is over a blank area
       testResult = testResult == HTCLIENT ? HTCAPTION : testResult;
@@ -6328,7 +6359,7 @@ nsWindow::InitMouseWheelScrollData()
 
   if (!::SystemParametersInfo(SPI_GETWHEELSCROLLCHARS, 0,
                               &sMouseWheelScrollChars, 0)) {
-    NS_ASSERTION(!nsUXThemeData::sIsVistaOrLater,
+    NS_ASSERTION(WinUtils::GetWindowsVersion() < WinUtils::VISTA_VERSION,
                  "Failed to get SPI_GETWHEELSCROLLCHARS");
     sMouseWheelScrollChars = 1;
   } else if (sMouseWheelScrollChars > WHEEL_DELTA) {
@@ -7173,7 +7204,7 @@ nsWindow::ConfigureChildren(const nsTArray<Configuration>& aConfigurations)
         r.Sub(bounds, configuration.mBounds);
         r.MoveBy(-bounds.x,
                  -bounds.y);
-        w->Invalidate(r.GetBounds(), false);
+        w->Invalidate(r.GetBounds());
       }
     }
     rv = w->SetWindowClipRegion(configuration.mClipRegion, false);
@@ -7262,15 +7293,17 @@ nsWindow::SetWindowClipRegion(const nsTArray<nsIntRect>& aRects,
     }
   }
 
-  // If a plugin is not visibile, especially if it is in a background tab,
+  // If a plugin is not visible, especially if it is in a background tab,
   // it should not be able to steal keyboard focus.  This code checks whether
   // the region that the plugin is being clipped to is NULLREGION.  If it is,
   // the plugin window gets disabled.
   if(mWindowType == eWindowType_plugin) {
     if(NULLREGION == ::CombineRgn(dest, dest, dest, RGN_OR)) {
+      ::ShowWindow(mWnd, SW_HIDE);
       ::EnableWindow(mWnd, FALSE);
     } else {
       ::EnableWindow(mWnd, TRUE);
+      ::ShowWindow(mWnd, SW_SHOW);
     }
   }
   if (!::SetWindowRgn(mWnd, dest, TRUE)) {
@@ -7393,7 +7426,7 @@ bool nsWindow::OnResize(nsIntRect &aWindowRect)
 #ifdef CAIRO_HAS_D2D_SURFACE
   if (mD2DWindowSurface) {
     mD2DWindowSurface = NULL;
-    Invalidate(false);
+    Invalidate();
   }
 #endif
 
@@ -8024,8 +8057,6 @@ nsWindow::GetRootAccessible()
   if (accForceDisable)
       return nsnull;
 
-  nsWindow::sIsAccessibilityOn = TRUE;
-
   if (mInDtor || mOnDestroyCalled || mWindowType == eWindowType_invisible) {
     return nsnull;
   }
@@ -8034,24 +8065,6 @@ nsWindow::GetRootAccessible()
   NS_LOG_WMGETOBJECT_WND("This Window", mWnd);
 
   return DispatchAccessibleEvent(NS_GETACCESSIBLE);
-}
-
-STDMETHODIMP_(LRESULT)
-nsWindow::LresultFromObject(REFIID riid, WPARAM wParam, LPUNKNOWN pAcc)
-{
-  // open the dll dynamically
-  if (!sAccLib)
-    sAccLib =::LoadLibraryW(L"OLEACC.DLL");
-
-  if (sAccLib) {
-    if (!sLresultFromObject)
-      sLresultFromObject = (LPFNLRESULTFROMOBJECT)GetProcAddress(sAccLib,"LresultFromObject");
-
-    if (sLresultFromObject)
-      return sLresultFromObject(riid,wParam,pAcc);
-  }
-
-  return 0;
 }
 #endif
 

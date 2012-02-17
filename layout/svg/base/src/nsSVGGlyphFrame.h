@@ -53,6 +53,8 @@ class nsSVGGlyphFrame;
 class CharacterIterator;
 struct CharacterPosition;
 
+typedef gfxFont::DrawMode DrawMode;
+
 typedef nsSVGGeometryFrame nsSVGGlyphFrameBase;
 
 class nsSVGGlyphFrame : public nsSVGGlyphFrameBase,
@@ -121,10 +123,16 @@ public:
     return mContent->GetText()->GetLength() == 0;
   }
   void SetTrimLeadingWhitespace(bool aTrimLeadingWhitespace) {
-    mTrimLeadingWhitespace = aTrimLeadingWhitespace;
+    if (mTrimLeadingWhitespace != aTrimLeadingWhitespace) {
+      mTrimLeadingWhitespace = aTrimLeadingWhitespace;
+      ClearTextRun();
+    }
   }
   void SetTrimTrailingWhitespace(bool aTrimTrailingWhitespace) {
-    mTrimTrailingWhitespace = aTrimTrailingWhitespace;
+    if (mTrimTrailingWhitespace != aTrimTrailingWhitespace) {
+      mTrimTrailingWhitespace = aTrimTrailingWhitespace;
+      ClearTextRun();
+    }
   }
   bool EndsWithWhitespace() const;
   bool IsAllWhitespace() const;
@@ -174,8 +182,8 @@ public:
   NS_IMETHOD_(nsRect) GetCoveredRegion();
   NS_IMETHOD InitialUpdate();
   virtual void NotifySVGChanged(PRUint32 aFlags);
-  NS_IMETHOD NotifyRedrawSuspended();
-  NS_IMETHOD NotifyRedrawUnsuspended();
+  virtual void NotifyRedrawSuspended();
+  virtual void NotifyRedrawUnsuspended();
   NS_IMETHOD_(bool) IsDisplayContainer() { return false; }
   NS_IMETHOD_(bool) HasValidCoveredRect() {
     return !(GetStateBits() & NS_STATE_SVG_NONDISPLAY_CHILD);
@@ -193,7 +201,10 @@ public:
   NS_IMETHOD_(nsSVGGlyphFrame *) GetFirstGlyphFrame();
   NS_IMETHOD_(nsSVGGlyphFrame *) GetNextGlyphFrame();
   NS_IMETHOD_(void) SetWhitespaceCompression(bool aCompressWhitespace) {
-    mCompressWhitespace = aCompressWhitespace;
+    if (mCompressWhitespace != aCompressWhitespace) {
+      mCompressWhitespace = aCompressWhitespace;
+      ClearTextRun();
+    }
   }
 
 protected:
@@ -227,8 +238,10 @@ protected:
                            gfxContext *aContext);
   void AddBoundingBoxesToPath(CharacterIterator *aIter,
                               gfxContext *aContext);
-  void FillCharacters(CharacterIterator *aIter,
-                      gfxContext *aContext);
+  void DrawCharacters(CharacterIterator *aIter,
+                      gfxContext *aContext,
+                      DrawMode aDrawMode,
+                      gfxPattern *aStrokePattern = nsnull);
 
   void NotifyGlyphMetricsChange();
   void SetupGlobalTransform(gfxContext *aContext);
@@ -253,6 +266,9 @@ protected:
   bool mCompressWhitespace;
   bool mTrimLeadingWhitespace;
   bool mTrimTrailingWhitespace;
+
+private:
+  DrawMode SetupCairoState(gfxContext *context, nsRefPtr<gfxPattern> *strokePattern);
 };
 
 #endif
