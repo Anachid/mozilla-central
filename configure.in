@@ -225,7 +225,14 @@ if test -n "$L10NBASEDIR"; then
     if test "$L10NBASEDIR" = "yes" -o "$L10NBASEDIR" = "no"; then
         AC_MSG_ERROR([--with-l10n-base must specify a path])
     elif test -d "$L10NBASEDIR"; then
-        L10NBASEDIR=`cd "$L10NBASEDIR" && pwd`
+        case "$host_os" in
+        mingw*)
+            L10NBASEDIR=`cd "$L10NBASEDIR" && pwd -W`
+            ;;
+        *)
+            L10NBASEDIR=`cd "$L10NBASEDIR" && pwd`
+            ;;
+        esac
     else
         AC_MSG_ERROR([Invalid value --with-l10n-base, $L10NBASEDIR doesn't exist])
     fi
@@ -313,7 +320,7 @@ if test -n "$gonkdir" ; then
     STLPORT_CPPFLAGS="-I$gonkdir/ndk/sources/cxx-stl/stlport/stlport/"
     STLPORT_LIBS="-lstlport"
 
-    CPPFLAGS="-DANDROID -I$gonkdir/bionic/libc/include/ -I$gonkdir/bionic/libc/kernel/common -I$gonkdir/bionic/libc/arch-arm/include -I$gonkdir/bionic/libc/kernel/arch-arm -I$gonkdir/bionic/libm/include -I$gonkdir/frameworks/base/opengl/include -I$gonkdir/frameworks/base/native/include -I$gonkdir/hardware/libhardware/include -I$gonkdir/hardware/libhardware_legacy/include -I$gonkdir/system/core/include -I$gonkdir/bionic -I$gonkdir/frameworks/base/include $STLPORT_CPPFLAGS $CPPFLAGS"
+    CPPFLAGS="-DANDROID -I$gonkdir/bionic/libc/include/ -I$gonkdir/bionic/libc/kernel/common -I$gonkdir/bionic/libc/arch-arm/include -I$gonkdir/bionic/libc/kernel/arch-arm -I$gonkdir/bionic/libm/include -I$gonkdir/frameworks/base/opengl/include -I$gonkdir/frameworks/base/native/include -I$gonkdir/hardware/libhardware/include -I$gonkdir/hardware/libhardware_legacy/include -I$gonkdir/system/core/include -I$gonkdir/bionic -I$gonkdir/frameworks/base/include $STLPORT_CPPFLAGS $CPPFLAGS -I$gonkdir/frameworks/base/services/sensorservice"
     CFLAGS="-mandroid -fno-short-enums -fno-exceptions $CFLAGS"
     CXXFLAGS="-mandroid -fno-short-enums -fno-exceptions $CXXFLAGS"
     LIBS="$LIBS $STLPORT_LIBS"
@@ -460,6 +467,9 @@ case "$target" in
     if test -z "$ANDROID_PACKAGE_NAME" ; then
         ANDROID_PACKAGE_NAME='org.mozilla.$(MOZ_APP_NAME)'
     fi
+    if test -z "$MOZ_MOBILE_COMPAT" ; then
+        MOZ_MOBILE_COMPAT='All'
+    fi
 
     AC_DEFINE(ANDROID)
     AC_DEFINE_UNQUOTED(ANDROID_VERSION, $android_version)
@@ -481,6 +491,7 @@ AC_SUBST(ANDROID_PLATFORM)
 AC_SUBST(ANDROID_SDK)
 AC_SUBST(ANDROID_PLATFORM_TOOLS)
 AC_SUBST(ANDROID_PACKAGE_NAME)
+AC_SUBST(MOZ_MOBILE_COMPAT)
 AC_SUBST(OBJCOPY)
 
 dnl ========================================================
@@ -3332,6 +3343,7 @@ AC_SUBST(WRAP_SYSTEM_INCLUDES)
 AC_SUBST(VISIBILITY_FLAGS)
 
 MOZ_GCC_PR49911
+MOZ_COMPILER_OPTS
 
 dnl Check for __force_align_arg_pointer__ for SSE2 on gcc
 dnl ========================================================
@@ -4582,6 +4594,7 @@ MOZ_AUTH_EXTENSION=1
 MOZ_OGG=1
 MOZ_RAW=
 MOZ_SYDNEYAUDIO=
+MOZ_CUBEB=
 MOZ_VORBIS=
 MOZ_TREMOR=
 MOZ_WAVE=1
@@ -4600,6 +4613,7 @@ LIBJPEG_TURBO_AS=
 LIBJPEG_TURBO_ASFLAGS=
 LIBJPEG_TURBO_X86_ASM=
 LIBJPEG_TURBO_X64_ASM=
+LIBJPEG_TURBO_ARM_ASM=
 MOZ_PANGO=1
 MOZ_PERMISSIONS=1
 MOZ_PLACES=1
@@ -4611,6 +4625,7 @@ MOZ_SAFE_BROWSING=
 MOZ_HELP_VIEWER=
 MOZ_SPELLCHECK=1
 MOZ_JAVA_COMPOSITOR=
+MOZ_ONLY_TOUCH_EVENTS=
 MOZ_SVG_DLISTS=
 MOZ_TOOLKIT_SEARCH=1
 MOZ_UI_LOCALE=en-US
@@ -4914,6 +4929,7 @@ cairo-gonk)
     MOZ_PDF_PRINTING=1
     MOZ_B2G_RIL=1
     MOZ_TOUCH=1
+    MOZ_B2G_BT=1
     ;;
 
 esac
@@ -5475,7 +5491,7 @@ MOZ_ARG_DISABLE_BOOL(websms-backend,
     MOZ_WEBSMS_BACKEND=,
     MOZ_WEBSMS_BACKEND=1)
 
-if test $MOZ_WEBSMS_BACKEND -eq 1; then
+if test -n "$MOZ_WEBSMS_BACKEND"; then
     AC_DEFINE(MOZ_WEBSMS_BACKEND)
 fi
 
@@ -5592,6 +5608,7 @@ MOZ_ARG_DISABLE_BOOL(ogg,
 if test -n "$MOZ_OGG"; then
     AC_DEFINE(MOZ_OGG)
     MOZ_SYDNEYAUDIO=1
+    MOZ_CUBEB=1
     MOZ_MEDIA=1
     case "$target_cpu" in
     arm*)
@@ -5709,6 +5726,7 @@ AC_SUBST(MOZ_LIBVPX_LIBS)
 
 if test -n "$MOZ_WEBM" -a -z "$MOZ_NATIVE_LIBVPX"; then
     MOZ_SYDNEYAUDIO=1
+    MOZ_CUBEB=1
     MOZ_MEDIA=1
     case "$target_cpu" in
     arm*)
@@ -5820,15 +5838,27 @@ MOZ_ARG_DISABLE_BOOL(wave,
 if test -n "$MOZ_WAVE"; then
     AC_DEFINE(MOZ_WAVE)
     MOZ_SYDNEYAUDIO=1
+    MOZ_CUBEB=1
     MOZ_MEDIA=1
 fi
 
 dnl ========================================================
-dnl = Handle dependent SYDNEYAUDIO and MEDIA defines
+dnl = Handle dependent SYDNEYAUDIO, CUBEB, and MEDIA defines
 dnl ========================================================
 
 if test -n "$MOZ_SYDNEYAUDIO"; then
     AC_DEFINE(MOZ_SYDNEYAUDIO)
+fi
+
+if test -n "$MOZ_CUBEB"; then
+    case "$target" in
+    *-mingw*)
+        AC_DEFINE(MOZ_CUBEB)
+        ;;
+    *)
+        dnl Other targets will be enabled soon.
+        ;;
+    esac
 fi
 
 if test -n "$MOZ_MEDIA"; then
@@ -5937,7 +5967,8 @@ MOZ_PATH_PROG(JAVA, java, :, [$JAVA_PATH])
 MOZ_PATH_PROG(JAVAC, javac, :, [$JAVA_PATH])
 MOZ_PATH_PROG(JAR, jar, :, [$JAVA_PATH])
 
-if test -n "${JAVA_BIN_PATH}" -o "$OS_TARGET" = Android; then
+if test -n "${JAVA_BIN_PATH}" -o \
+  \( "$OS_TARGET" = Android -a x"$MOZ_WIDGET_TOOLKIT" != x"gonk" \); then
   if test -z "$JAVA" -o "$JAVA" = ":" -o -z "$JAVAC" -o "$JAVAC" = ":" -o -z "$JAR" -o "$JAR" = ":"; then
     AC_MSG_ERROR([The programs java, javac and jar were not found.  Set \$JAVA_HOME to your java sdk directory or use --with-java-bin-path={java-bin-dir}])
   fi
@@ -6142,38 +6173,51 @@ if test -n "$MOZ_LIBJPEG_TURBO"; then
     LIBJPEG_TURBO_ASFLAGS="-f win64 -rnasm -pnasm -D__x86_64__ -DPIC -DWIN64 -DMSVC"
     LIBJPEG_TURBO_X64_ASM=1
   ;;
+  *:arm*)
+    LIBJPEG_TURBO_ASFLAGS="-march=armv7-a -mfpu=neon"
+    LIBJPEG_TURBO_ARM_ASM=1
+  ;;
   esac
 
 fi
 
-dnl If we're on a system which supports libjpeg-turbo's asm routines and
-dnl --disable-libjpeg-turbo wasn't passed, check for yasm, and error out if it
-dnl doesn't exist or we have too old of a version.
+dnl If we're on an x86 or x64 system which supports libjpeg-turbo's asm routines
+dnl and --disable-libjpeg-turbo wasn't passed, check for Yasm, and error out if
+dnl it doesn't exist or we have too old of a version.
 if test -n "$LIBJPEG_TURBO_X86_ASM" -o -n "$LIBJPEG_TURBO_X64_ASM" ; then
-    AC_MSG_CHECKING([for YASM assembler])
+    AC_MSG_CHECKING([for Yasm assembler])
     AC_CHECK_PROGS(LIBJPEG_TURBO_AS, yasm, "")
 
     if test -z "$LIBJPEG_TURBO_AS" ; then
-        AC_MSG_ERROR([yasm is required to build with libjpeg-turbo's optimized JPEG decoding routines, but you do not appear to have yasm installed.  Either install it or configure with --disable-libjpeg-turbo to use the pure C JPEG decoder.  See https://developer.mozilla.org/en/YASM for more details.])
+        AC_MSG_ERROR([Yasm is required to build with libjpeg-turbo's optimized JPEG decoding routines, but you do not appear to have Yasm installed.  Either install it or configure with --disable-libjpeg-turbo to use the pure C JPEG decoder.  See https://developer.mozilla.org/en/YASM for more details.])
     fi
 
     dnl Check that we have the right yasm version.  We require 1.0.1 or newer
     dnl on Linux and 1.1 or newer everywhere else.
     if test "$OS_ARCH" = "Linux" ; then
         if test "$_YASM_MAJOR_VERSION" -lt "1" -o \( "$_YASM_MAJOR_VERSION" -eq "1" -a "$_YASM_MINOR_VERSION" -eq "0" -a "$_YASM_RELEASE" -lt "1" \) ; then
-            AC_MSG_ERROR([yasm 1.0.1 or greater is required to build with libjpeg-turbo's optimized JPEG decoding routines, but you appear to have version $_YASM_MAJOR_VERSION.$_YASM_MINOR_VERSION.$_YASM_RELEASE.  Upgrade to the newest version or configure with --disable-libjpeg-turbo to use the pure C JPEG decoder.  See https://developer.mozilla.org/en/YASM for more details.])
+            AC_MSG_ERROR([Yasm 1.0.1 or greater is required to build with libjpeg-turbo's optimized JPEG decoding routines, but you appear to have version $_YASM_MAJOR_VERSION.$_YASM_MINOR_VERSION.$_YASM_RELEASE.  Upgrade to the newest version or configure with --disable-libjpeg-turbo to use the pure C JPEG decoder.  See https://developer.mozilla.org/en/YASM for more details.])
         fi
     else
         if test "$_YASM_MAJOR_VERSION" -lt "1" -o \( "$_YASM_MAJOR_VERSION" -eq "1" -a "$_YASM_MINOR_VERSION" -lt "1" \) ; then
-            AC_MSG_ERROR([yasm 1.1 or greater is required to build with libjpeg-turbo's optimized JPEG decoding routines, but you appear to have version $_YASM_MAJOR_VERSION.$_YASM_MINOR_VERSION.  Upgrade to the newest version or configure with --disable-libjpeg-turbo to use the pure C JPEG decoder.  See https://developer.mozilla.org/en/YASM for more details.])
+            AC_MSG_ERROR([Yasm 1.1 or greater is required to build with libjpeg-turbo's optimized JPEG decoding routines, but you appear to have version $_YASM_MAJOR_VERSION.$_YASM_MINOR_VERSION.  Upgrade to the newest version or configure with --disable-libjpeg-turbo to use the pure C JPEG decoder.  See https://developer.mozilla.org/en/YASM for more details.])
         fi
     fi
+fi
+
+dnl If we're on an ARM system which supports libjpeg-turbo's asm routines and
+dnl --disable-libjpeg-turbo wasn't passed, use the C compiler as the assembler.
+if test -n "$LIBJPEG_TURBO_ARM_ASM" ; then
+    echo "Using $AS as the assembler for ARM code."
+    LIBJPEG_TURBO_AS=$AS
 fi
 
 if test -n "$LIBJPEG_TURBO_X86_ASM"; then
     AC_DEFINE(LIBJPEG_TURBO_X86_ASM)
 elif test -n "$LIBJPEG_TURBO_X64_ASM"; then
     AC_DEFINE(LIBJPEG_TURBO_X64_ASM)
+elif test -n "$LIBJPEG_TURBO_ARM_ASM"; then
+    AC_DEFINE(LIBJPEG_TURBO_ARM_ASM)
 elif test -n "$MOZ_LIBJPEG_TURBO"; then
     dnl Warn if we're not building the optimized routines, even though the user
     dnl didn't specify --disable-libjpeg-turbo.
@@ -7265,7 +7309,7 @@ if test "$OS_TARGET" = Android; then
         if test -n "$MOZ_OLD_LINKER"; then
             WRAP_LDFLAGS="${WRAP_LDFLAGS} -Wl,--wrap=dlopen,--wrap=dlclose,--wrap=dlerror,--wrap=dlsym,--wrap=dladdr"
         fi
-        WRAP_LDFLAGS="${WRAP_LDFLAGS} --wrap=getaddrinfo,--wrap=freeaddrinfo,--wrap=gai_strerror"
+        WRAP_LDFLAGS="${WRAP_LDFLAGS} -Wl,--wrap=getaddrinfo,--wrap=freeaddrinfo,--wrap=gai_strerror"
     fi
 fi
 
@@ -7568,6 +7612,18 @@ if test -n "$MOZ_B2G_RIL"; then
    AC_DEFINE(MOZ_B2G_RIL)
 fi
 AC_SUBST(MOZ_B2G_RIL)
+
+dnl ========================================================
+dnl = Enable Bluetooth Interface for B2G (Gonk usually)
+dnl ========================================================
+MOZ_ARG_ENABLE_BOOL(b2g-bt,
+[  --enable-b2g-bt      Set compile flags necessary for compiling Bluetooth API for B2G ],
+    MOZ_B2G_BT=1,
+    MOZ_B2G_BT= )
+if test -n "$MOZ_B2G_BT"; then
+   AC_DEFINE(MOZ_B2G_BT)
+fi
+AC_SUBST(MOZ_B2G_BT)
 
 dnl ========================================================
 dnl = Support for demangling undefined symbols
@@ -8190,7 +8246,7 @@ dnl ========================================================
 dnl qcms
 dnl ========================================================
 
-QCMS_LIBS='$(call EXPAND_LIBNAME_PATH,mozqcms,$(DEPTH)/gfx/qcms)'
+QCMS_LIBS='$(DEPTH)/gfx/qcms/$(LIB_PREFIX)mozqcms.$(LIB_SUFFIX)'
 AC_SUBST(QCMS_LIBS)
 
 dnl ========================================================
@@ -8444,6 +8500,7 @@ AC_SUBST(MOZ_UNIVERSALCHARDET)
 AC_SUBST(ACCESSIBILITY)
 AC_SUBST(MOZ_SPELLCHECK)
 AC_SUBST(MOZ_JAVA_COMPOSITOR)
+AC_SUBST(MOZ_ONLY_TOUCH_EVENTS)
 AC_SUBST(MOZ_USER_DIR)
 AC_SUBST(MOZ_CRASHREPORTER)
 AC_SUBST(MOZ_MAINTENANCE_SERVICE)
@@ -8692,6 +8749,7 @@ AC_SUBST(MOZ_APP_EXTRA_LIBS)
 
 AC_SUBST(MOZ_MEDIA)
 AC_SUBST(MOZ_SYDNEYAUDIO)
+AC_SUBST(MOZ_CUBEB)
 AC_SUBST(MOZ_WAVE)
 AC_SUBST(MOZ_VORBIS)
 AC_SUBST(MOZ_TREMOR)
@@ -8713,6 +8771,7 @@ AC_SUBST(LIBJPEG_TURBO_AS)
 AC_SUBST(LIBJPEG_TURBO_ASFLAGS)
 AC_SUBST(LIBJPEG_TURBO_X86_ASM)
 AC_SUBST(LIBJPEG_TURBO_X64_ASM)
+AC_SUBST(LIBJPEG_TURBO_ARM_ASM)
 
 AC_MSG_CHECKING([for posix_fallocate])
 AC_TRY_LINK([#define _XOPEN_SOURCE 600
@@ -9041,14 +9100,14 @@ if test -z "$MOZ_NATIVE_NSPR"; then
     if test -n "$USE_ARM_KUSER"; then
         ac_configure_args="$ac_configure_args --with-arm-kuser"
     fi
-    if test -n "$MOZ_LINKER" -a -z "$MOZ_OLD_LINKER" -a $ac_cv_func_dladdr = no ; then
+    if test -n "$MOZ_LINKER" -a -z "$MOZ_OLD_LINKER" -a "$ac_cv_func_dladdr" = no ; then
       # dladdr is supported by the new linker, even when the system linker doesn't
       # support it. Trick nspr into using dladdr when it's not supported.
       _SAVE_CPPFLAGS="$CPPFLAGS"
       export CPPFLAGS="-include $_topsrcdir/mozglue/linker/dladdr.h $CPPFLAGS"
     fi
     AC_OUTPUT_SUBDIRS(nsprpub)
-    if test -n "$MOZ_LINKER" -a -z "$MOZ_OLD_LINKER" -a $ac_cv_func_dladdr = no; then
+    if test -n "$MOZ_LINKER" -a -z "$MOZ_OLD_LINKER" -a "$ac_cv_func_dladdr" = no; then
       unset CPPFLAGS
       CPPFLAGS="$_SAVE_CFLAGS"
     fi
@@ -9104,12 +9163,12 @@ ac_configure_args="$ac_configure_args --prefix=$dist"
 ac_configure_args="$ac_configure_args --with-sync-build-files=$_topsrcdir"
 if test "$MOZ_MEMORY"; then
    ac_configure_args="$ac_configure_args --enable-jemalloc"
-   if test -n "$MOZ_GLUE_LDFLAGS"; then
-     export MOZ_GLUE_LDFLAGS
-   fi
-   if test -n "$MOZ_GLUE_PROGRAM_LDFLAGS"; then
-     export MOZ_GLUE_PROGRAM_LDFLAGS
-   fi
+fi
+if test -n "$MOZ_GLUE_LDFLAGS"; then
+   export MOZ_GLUE_LDFLAGS
+fi
+if test -n "$MOZ_GLUE_PROGRAM_LDFLAGS"; then
+   export MOZ_GLUE_PROGRAM_LDFLAGS
 fi
 export MOZ_APP_NAME
 AC_OUTPUT_SUBDIRS(js/src)

@@ -71,6 +71,7 @@
 #include "nsChangeHint.h"
 #include "nsGUIEvent.h"
 #include "nsInterfaceHashtable.h"
+#include "nsEventStates.h"
 
 class nsIContent;
 class nsIDocument;
@@ -143,8 +144,8 @@ typedef struct CapturingContentInfo {
 } CapturingContentInfo;
 
 #define NS_IPRESSHELL_IID    \
-        { 0x87acd089, 0x8da7, 0x4438, \
-          { 0xa5, 0xcd, 0x90, 0x1e, 0x5d, 0x8f, 0xd8, 0x19 } }
+        { 0x87719fd6, 0xe50c, 0x4d72, \
+          { 0xbd, 0x55, 0x05, 0xf9, 0x5f, 0x33, 0x9e, 0xf2 } }
 
 // Constants for ScrollContentIntoView() function
 #define NS_PRESSHELL_SCROLL_TOP      0
@@ -269,8 +270,10 @@ public:
   nsCSSFrameConstructor* FrameConstructor() const { return mFrameConstructor; }
 
   nsFrameManager* FrameManager() const {
+    // reinterpret_cast is valid since nsFrameManager does not add
+    // any members over nsFrameManagerBase.
     return reinterpret_cast<nsFrameManager*>
-                           (&const_cast<nsIPresShell*>(this)->mFrameManager);
+                           (const_cast<nsIPresShell*>(this)->mFrameManager);
   }
 
 #endif
@@ -382,7 +385,7 @@ public:
   virtual NS_HIDDEN_(nsIFrame*) GetRootFrameExternal() const;
   nsIFrame* GetRootFrame() const {
 #ifdef _IMPL_NS_LAYOUT
-    return mFrameManager.GetRootFrame();
+    return mFrameManager->GetRootFrame();
 #else
     return GetRootFrameExternal();
 #endif
@@ -779,6 +782,13 @@ public:
    * Reconstruct frames for all elements in the document
    */
   virtual nsresult ReconstructFrames() = 0;
+
+  /**
+   * Notify that a content node's state has changed
+   */
+  virtual void ContentStateChanged(nsIDocument* aDocument,
+                                   nsIContent* aContent,
+                                   nsEventStates aStateMask) = 0;
 
   /**
    * Given aFrame, the root frame of a stacking context, find its descendant
@@ -1222,7 +1232,9 @@ protected:
   nsCSSFrameConstructor*    mFrameConstructor; // [OWNS]
   nsIViewManager*           mViewManager;   // [WEAK] docViewer owns it so I don't have to
   nsFrameSelection*         mSelection;
-  nsFrameManagerBase        mFrameManager;  // [OWNS]
+  // Pointer into mFrameConstructor - this is purely so that FrameManager() and
+  // GetRootFrame() can be inlined:
+  nsFrameManagerBase*       mFrameManager;
   nsWeakPtr                 mForwardingContainer;
 
 #ifdef NS_DEBUG

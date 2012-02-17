@@ -362,6 +362,8 @@ nsContentUtils::Init()
     return NS_OK;
   }
 
+  nsINode::Init();
+
   nsresult rv = NS_GetNameSpaceManager(&sNameSpaceManager);
   NS_ENSURE_SUCCESS(rv, rv);
 
@@ -3072,7 +3074,7 @@ static
 nsresult GetEventAndTarget(nsIDocument* aDoc, nsISupports* aTarget,
                            const nsAString& aEventName,
                            bool aCanBubble, bool aCancelable,
-                           nsIDOMEvent** aEvent,
+                           bool aTrusted, nsIDOMEvent** aEvent,
                            nsIDOMEventTarget** aTargetOut)
 {
   nsCOMPtr<nsIDOMDocument> domDoc = do_QueryInterface(aDoc);
@@ -3090,7 +3092,7 @@ nsresult GetEventAndTarget(nsIDocument* aDoc, nsISupports* aTarget,
   rv = event->InitEvent(aEventName, aCanBubble, aCancelable);
   NS_ENSURE_SUCCESS(rv, rv);
 
-  rv = privateEvent->SetTrusted(true);
+  rv = privateEvent->SetTrusted(aTrusted);
   NS_ENSURE_SUCCESS(rv, rv);
 
   rv = privateEvent->SetTarget(target);
@@ -3108,10 +3110,32 @@ nsContentUtils::DispatchTrustedEvent(nsIDocument* aDoc, nsISupports* aTarget,
                                      bool aCanBubble, bool aCancelable,
                                      bool *aDefaultAction)
 {
+  return DispatchEvent(aDoc, aTarget, aEventName, aCanBubble, aCancelable,
+                       true, aDefaultAction);
+}
+
+// static
+nsresult
+nsContentUtils::DispatchUntrustedEvent(nsIDocument* aDoc, nsISupports* aTarget,
+                                       const nsAString& aEventName,
+                                       bool aCanBubble, bool aCancelable,
+                                       bool *aDefaultAction)
+{
+  return DispatchEvent(aDoc, aTarget, aEventName, aCanBubble, aCancelable,
+                       false, aDefaultAction);
+}
+
+// static
+nsresult
+nsContentUtils::DispatchEvent(nsIDocument* aDoc, nsISupports* aTarget,
+                              const nsAString& aEventName,
+                              bool aCanBubble, bool aCancelable,
+                              bool aTrusted, bool *aDefaultAction)
+{
   nsCOMPtr<nsIDOMEvent> event;
   nsCOMPtr<nsIDOMEventTarget> target;
   nsresult rv = GetEventAndTarget(aDoc, aTarget, aEventName, aCanBubble,
-                                  aCancelable, getter_AddRefs(event),
+                                  aCancelable, aTrusted, getter_AddRefs(event),
                                   getter_AddRefs(target));
   NS_ENSURE_SUCCESS(rv, rv);
 
@@ -3130,7 +3154,7 @@ nsContentUtils::DispatchChromeEvent(nsIDocument *aDoc,
   nsCOMPtr<nsIDOMEvent> event;
   nsCOMPtr<nsIDOMEventTarget> target;
   nsresult rv = GetEventAndTarget(aDoc, aTarget, aEventName, aCanBubble,
-                                  aCancelable, getter_AddRefs(event),
+                                  aCancelable, true, getter_AddRefs(event),
                                   getter_AddRefs(target));
   NS_ENSURE_SUCCESS(rv, rv);
 
@@ -3421,7 +3445,6 @@ PLDHashOperator
 ListenerEnumerator(PLDHashTable* aTable, PLDHashEntryHdr* aEntry,
                    PRUint32 aNumber, void* aArg)
 {
-  PRUint32* gen = static_cast<PRUint32*>(aArg);
   EventListenerManagerMapEntry* entry =
     static_cast<EventListenerManagerMapEntry*>(aEntry);
   if (entry) {
@@ -4874,11 +4897,8 @@ nsContentUtils::SetDataTransferInEvent(nsDragEvent* aDragEvent)
   }
 
   // each event should use a clone of the original dataTransfer.
-  nsCOMPtr<nsIDOMNSDataTransfer> initialDataTransferNS =
-    do_QueryInterface(initialDataTransfer);
-  NS_ENSURE_TRUE(initialDataTransferNS, NS_ERROR_FAILURE);
-  initialDataTransferNS->Clone(aDragEvent->message, aDragEvent->userCancelled,
-                               getter_AddRefs(aDragEvent->dataTransfer));
+  initialDataTransfer->Clone(aDragEvent->message, aDragEvent->userCancelled,
+                             getter_AddRefs(aDragEvent->dataTransfer));
   NS_ENSURE_TRUE(aDragEvent->dataTransfer, NS_ERROR_OUT_OF_MEMORY);
 
   // for the dragenter and dragover events, initialize the drop effect
@@ -4886,14 +4906,10 @@ nsContentUtils::SetDataTransferInEvent(nsDragEvent* aDragEvent)
   // the event is fired based on the keyboard state.
   if (aDragEvent->message == NS_DRAGDROP_ENTER ||
       aDragEvent->message == NS_DRAGDROP_OVER) {
-    nsCOMPtr<nsIDOMNSDataTransfer> newDataTransfer =
-      do_QueryInterface(aDragEvent->dataTransfer);
-    NS_ENSURE_TRUE(newDataTransfer, NS_ERROR_FAILURE);
-
     PRUint32 action, effectAllowed;
     dragSession->GetDragAction(&action);
-    newDataTransfer->GetEffectAllowedInt(&effectAllowed);
-    newDataTransfer->SetDropEffectInt(FilterDropEffect(action, effectAllowed));
+    aDragEvent->dataTransfer->GetEffectAllowedInt(&effectAllowed);
+    aDragEvent->dataTransfer->SetDropEffectInt(FilterDropEffect(action, effectAllowed));
   }
   else if (aDragEvent->message == NS_DRAGDROP_DROP ||
            aDragEvent->message == NS_DRAGDROP_DRAGDROP ||
@@ -4902,13 +4918,9 @@ nsContentUtils::SetDataTransferInEvent(nsDragEvent* aDragEvent)
     // last value that the dropEffect had. This will have been set in
     // nsEventStateManager::PostHandleEvent for the last dragenter or
     // dragover event.
-    nsCOMPtr<nsIDOMNSDataTransfer> newDataTransfer =
-      do_QueryInterface(aDragEvent->dataTransfer);
-    NS_ENSURE_TRUE(newDataTransfer, NS_ERROR_FAILURE);
-
     PRUint32 dropEffect;
-    initialDataTransferNS->GetDropEffectInt(&dropEffect);
-    newDataTransfer->SetDropEffectInt(dropEffect);
+    initialDataTransfer->GetDropEffectInt(&dropEffect);
+    aDragEvent->dataTransfer->SetDropEffectInt(dropEffect);
   }
 
   return NS_OK;

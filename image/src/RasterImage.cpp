@@ -945,13 +945,9 @@ RasterImage::GetFrame(PRUint32 aWhichFrame,
 
 
 NS_IMETHODIMP
-RasterImage::GetImageContainer(LayerManager* aManager,
-                               ImageContainer **_retval)
+RasterImage::GetImageContainer(ImageContainer **_retval)
 {
-  if (mImageContainer && 
-      (mImageContainer->Manager() == aManager || 
-       (!mImageContainer->Manager() && 
-        (mImageContainer->GetBackendType() == aManager->GetBackendType())))) {
+  if (mImageContainer) {
     *_retval = mImageContainer;
     NS_ADDREF(*_retval);
     return NS_OK;
@@ -966,8 +962,7 @@ RasterImage::GetImageContainer(LayerManager* aManager,
   GetWidth(&cairoData.mSize.width);
   GetHeight(&cairoData.mSize.height);
 
-  mImageContainer = aManager->CreateImageContainer();
-  NS_ASSERTION(mImageContainer, "Failed to create ImageContainer!");
+  mImageContainer = LayerManager::CreateImageContainer();
   
   // Now create a CairoImage to display the surface.
   layers::Image::Format cairoFormat = layers::Image::CAIRO_SURFACE;
@@ -2924,7 +2919,9 @@ RasterImage::DecodeWorker::Run()
     if (!request)
       break;
 
-    RasterImage *image = request->mImage;
+    // This has to be a strong pointer, because DecodeSomeOfImage may destroy
+    // image->mDecoder, which may be holding the only other reference to image.
+    nsRefPtr<RasterImage> image = request->mImage;
     DecodeSomeOfImage(image);
 
     // If we aren't yet finished decoding and we have more data in hand, add
@@ -3011,10 +3008,10 @@ RasterImage::DecodeWorker::DecodeSomeOfImage(
 
     if (aDecodeType == DECODE_TYPE_UNTIL_SIZE && aImg->mHasSize)
       break;
-  }
-  while (aImg->mSourceData.Length() > aImg->mBytesDecoded &&
-         !aImg->IsDecodeFinished() &&
-         TimeStamp::Now() < deadline);
+
+  } while (aImg->mSourceData.Length() > aImg->mBytesDecoded &&
+           !aImg->IsDecodeFinished() &&
+           TimeStamp::Now() < deadline);
 
   aImg->mDecodeRequest.mDecodeTime += (TimeStamp::Now() - start);
 
@@ -3022,11 +3019,26 @@ RasterImage::DecodeWorker::DecodeSomeOfImage(
     Telemetry::Accumulate(Telemetry::IMAGE_DECODE_CHUNKS, chunkCount);
   }
 
-  // Flush invalidations _after_ we've written everything we're going to.
-  // Furthermore, if we have all of the data, we don't want to do progressive
-  // display at all. In that case, let Decoder::PostFrameStop() do the
-  // flush once the whole frame is ready.
-  if (!aImg->mHasSourceData) {
+  // Flush invalidations (and therefore paint) now that we've decoded all the
+  // chunks we're going to.
+  //
+  // However, don't paint if:
+  //
+  //  * This was an until-size decode.  Until-size decodes are always followed
+  //    by normal decodes, so don't bother painting.
+  //
+  //  * The decoder flagged an error.  The decoder may have written garbage
+  //    into the output buffer; don't paint it to the screen.
+  //
+  //  * We have all the source data.  This disables progressive display of
+  //    previously-decoded images, thus letting us finish decoding faster,
+  //    since we don't waste time painting while we decode.
+  //    Decoder::PostFrameStop() will flush invalidations once the decode is
+  //    done.
+
+  if (aDecodeType != DECODE_TYPE_UNTIL_SIZE &&
+      !aImg->mDecoder->HasError() &&
+      !aImg->mHasSourceData) {
     aImg->mInDecoder = true;
     aImg->mDecoder->FlushInvalidations();
     aImg->mInDecoder = false;

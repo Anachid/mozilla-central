@@ -54,7 +54,6 @@
 #include "jsclist.h"
 #include "jsdhash.h"
 #include "jsgc.h"
-#include "jsgcchunk.h"
 #include "jspropertycache.h"
 #include "jspropertytree.h"
 #include "jsutil.h"
@@ -77,10 +76,23 @@ JS_BEGIN_EXTERN_C
 struct DtoaState;
 JS_END_EXTERN_C
 
+struct JSSharpInfo {
+    bool hasGen;
+    bool isSharp;
+
+    JSSharpInfo() : hasGen(false), isSharp(false) {}
+};
+
+typedef js::HashMap<JSObject *, JSSharpInfo> JSSharpTable;
+
 struct JSSharpObjectMap {
-    jsrefcount  depth;
-    uint32_t    sharpgen;
-    JSHashTable *table;
+    jsrefcount   depth;
+    uint32_t     sharpgen;
+    JSSharpTable table;
+
+    JSSharpObjectMap(JSContext *cx) : depth(0), sharpgen(0), table(js::TempAllocPolicy(cx)) {
+        table.init();
+    }
 };
 
 namespace js {
@@ -127,9 +139,6 @@ typedef Vector<ScriptOpcodeCountsPair, 0, SystemAllocPolicy> ScriptOpcodeCountsV
 
 struct ConservativeGCData
 {
-    /* Base address of the native stack for the current thread. */
-    uintptr_t           *nativeStackBase;
-
     /*
      * The GC scans conservatively between ThreadData::nativeStackBase and
      * nativeStackTop unless the latter is NULL.
@@ -149,7 +158,7 @@ struct ConservativeGCData
     unsigned requestThreshold;
 
     ConservativeGCData()
-      : nativeStackBase(NULL), nativeStackTop(NULL), requestThreshold(0)
+      : nativeStackTop(NULL), requestThreshold(0)
     {}
 
     ~ConservativeGCData() {
@@ -180,14 +189,8 @@ struct ConservativeGCData
 
 } /* namespace js */
 
-struct JSRuntime
+struct JSRuntime : js::RuntimeFriendFields
 {
-    /*
-     * If non-zero, we were been asked to call the operation callback as soon
-     * as possible.
-     */
-    volatile int32_t    interrupt;
-
     /* Default compartment. */
     JSCompartment       *atomsCompartment;
 
@@ -223,11 +226,9 @@ struct JSRuntime
      */
     JSC::ExecutableAllocator *execAlloc_;
     WTF::BumpPointerAllocator *bumpAlloc_;
-    js::RegExpPrivateCache *repCache_;
 
     JSC::ExecutableAllocator *createExecutableAllocator(JSContext *cx);
     WTF::BumpPointerAllocator *createBumpPointerAllocator(JSContext *cx);
-    js::RegExpPrivateCache *createRegExpPrivateCache(JSContext *cx);
 
   public:
     JSC::ExecutableAllocator *getExecutableAllocator(JSContext *cx) {
@@ -236,12 +237,12 @@ struct JSRuntime
     WTF::BumpPointerAllocator *getBumpPointerAllocator(JSContext *cx) {
         return bumpAlloc_ ? bumpAlloc_ : createBumpPointerAllocator(cx);
     }
-    js::RegExpPrivateCache *maybeRegExpPrivateCache() {
-        return repCache_;
-    }
-    js::RegExpPrivateCache *getRegExpPrivateCache(JSContext *cx) {
-        return repCache_ ? repCache_ : createRegExpPrivateCache(cx);
-    }
+
+    /* Base address of the native stack for the current thread. */
+    uintptr_t           nativeStackBase;
+
+    /* The native stack size limit that runtime should not exceed. */
+    size_t              nativeStackQuota;
 
     /*
      * Frames currently running in js::Interpret. See InterpreterFrames for
@@ -294,8 +295,6 @@ struct JSRuntime
     js::GCLocks         gcLocksHash;
     jsrefcount          gcKeepAtoms;
     size_t              gcBytes;
-    size_t              gcTriggerBytes;
-    size_t              gcLastBytes;
     size_t              gcMaxBytes;
     size_t              gcMaxMallocBytes;
 
@@ -428,7 +427,7 @@ struct JSRuntime
     bool hasContexts() const {
         return !JS_CLIST_IS_EMPTY(&contextList);
     }
-    
+
     /* Per runtime debug hooks -- see jsprvtd.h and jsdbgapi.h. */
     JSDebugHooks        globalDebugHooks;
 
@@ -543,15 +542,14 @@ struct JSRuntime
      */
     int32_t             inOOMReport;
 
+    bool                jitHardening;
+
     JSRuntime();
     ~JSRuntime();
 
     bool init(uint32_t maxbytes);
 
     JSRuntime *thisFromCtor() { return this; }
-
-    void setGCLastBytes(size_t lastBytes, JSGCInvocationKind gckind);
-    void reduceGCTriggerBytes(size_t amount);
 
     /*
      * Call the system malloc while checking for GC memory pressure and
@@ -638,6 +636,11 @@ struct JSRuntime
     JS_FRIEND_API(void *) onOutOfMemory(void *p, size_t nbytes, JSContext *cx);
 
     JS_FRIEND_API(void) triggerOperationCallback();
+
+    void setJitHardening(bool enabled);
+    bool getJitHardening() const {
+        return jitHardening;
+    }
 
     void sizeOfExcludingThis(JSMallocSizeOfFun mallocSizeOf, size_t *normal, size_t *temporary,
                              size_t *regexpCode, size_t *stackCommitted);
@@ -764,7 +767,7 @@ typedef HashSet<JSObject *,
 
 } /* namespace js */
 
-struct JSContext
+struct JSContext : js::ContextFriendFields
 {
     explicit JSContext(JSRuntime *rt);
     JSContext *thisDuringConstruction() { return this; }
@@ -799,12 +802,6 @@ struct JSContext
      * NB: generatingError packs with throwing below.
      */
     JSPackedBool        generatingError;
-
-    /* Limit pointer for checking native stack consumption during recursion. */
-    uintptr_t           stackLimit;
-
-    /* Data shared by contexts and compartments in an address space. */
-    JSRuntime *const    runtime;
 
     /* GC heap compartment. */
     JSCompartment       *compartment;
@@ -936,7 +933,6 @@ struct JSContext
     bool hasStrictOption() const { return hasRunOption(JSOPTION_STRICT); }
     bool hasWErrorOption() const { return hasRunOption(JSOPTION_WERROR); }
     bool hasAtLineOption() const { return hasRunOption(JSOPTION_ATLINE); }
-    bool hasJITHardeningOption() const { return !hasRunOption(JSOPTION_SOFTEN); }
 
     js::LifoAlloc &tempLifoAlloc() { return runtime->tempLifoAlloc; }
     inline js::LifoAlloc &typeLifoAlloc();
@@ -1135,6 +1131,8 @@ struct JSContext
         JS_ASSERT(link);
         return reinterpret_cast<JSContext *>(uintptr_t(link) - offsetof(JSContext, link));
     }
+
+    void mark(JSTracer *trc);
 
   private:
     /*
@@ -1573,18 +1571,18 @@ class AutoShapeVector : public AutoVectorRooter<const Shape *>
 
 class AutoValueArray : public AutoGCRooter
 {
-    const js::Value *start_;
+    js::Value *start_;
     unsigned length_;
 
   public:
-    AutoValueArray(JSContext *cx, const js::Value *start, unsigned length
+    AutoValueArray(JSContext *cx, js::Value *start, unsigned length
                    JS_GUARD_OBJECT_NOTIFIER_PARAM)
         : AutoGCRooter(cx, VALARRAY), start_(start), length_(length)
     {
         JS_GUARD_OBJECT_NOTIFIER_INIT;
     }
 
-    const Value *start() const { return start_; }
+    Value *start() { return start_; }
     unsigned length() const { return length_; }
 
     JS_DECL_USE_GUARD_OBJECT_NOTIFIER

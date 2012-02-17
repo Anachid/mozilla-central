@@ -339,6 +339,10 @@ nsObjectFrame::Init(nsIContent*      aContent,
 void
 nsObjectFrame::DestroyFrom(nsIFrame* aDestructRoot)
 {
+  if (mReflowCallbackPosted) {
+    PresContext()->PresShell()->CancelReflowCallback(this);
+  }
+
   // Tell content owner of the instance to disconnect its frame.
   nsCOMPtr<nsIObjectLoadingContent> objContent(do_QueryInterface(mContent));
   NS_ASSERTION(objContent, "Why not an object loading content?");
@@ -476,20 +480,6 @@ nsObjectFrame::PrepForDrawing(nsIWidget *aWidget)
         break;
       }
     }
-
-#ifdef XP_MACOSX
-    // Now that we have a widget we want to set the event model before
-    // any events are processed.
-    nsCOMPtr<nsIPluginWidget> pluginWidget = do_QueryInterface(mWidget);
-    if (!pluginWidget)
-      return NS_ERROR_FAILURE;
-    pluginWidget->SetPluginEventModel(mInstanceOwner->GetEventModel());
-    pluginWidget->SetPluginDrawingModel(mInstanceOwner->GetDrawingModel());
-
-    if (mInstanceOwner->GetDrawingModel() == NPDrawingModelCoreAnimation) {
-      mInstanceOwner->SetupCARefresh();
-    }
-#endif
   } else {
     // Changing to windowless mode changes the NPWindow geometry.
     FixupWindow(GetContentRectRelativeToSelf().Size());
@@ -1139,8 +1129,12 @@ nsObjectFrame::IsTransparentMode() const
   if (!mInstanceOwner)
     return false;
 
-  NPWindow *window;
+  NPWindow *window = nsnull;
   mInstanceOwner->GetWindow(window);
+  if (!window) {
+    return false;
+  }
+
   if (window->type != NPWindowTypeDrawable)
     return false;
 
@@ -1460,40 +1454,15 @@ nsObjectFrame::PrintPlugin(nsRenderingContext& aRenderingContext,
 }
 
 already_AddRefed<ImageContainer>
-nsObjectFrame::GetImageContainer(LayerManager* aManager)
+nsObjectFrame::GetImageContainer()
 {
-  nsRefPtr<LayerManager> manager = aManager;
-  bool retain = false;
+  nsRefPtr<ImageContainer> container = mImageContainer;
 
-  if (!manager) {
-    manager = nsContentUtils::LayerManagerForDocument(mContent->OwnerDoc(), &retain);
-  }
-  if (!manager) {
-    return nsnull;
+  if (container) {
+    return container.forget();
   }
 
-  nsRefPtr<ImageContainer> container;
-
-  // XXX - in the future image containers will be manager independent and
-  // we can remove the manager equals check and only check the backend type.
-  if (mImageContainer) {
-    if ((!mImageContainer->Manager() || mImageContainer->Manager() == manager) &&
-        mImageContainer->GetBackendType() == manager->GetBackendType()) {
-      container = mImageContainer;
-      return container.forget();
-    }
-  }
-
-  container = manager->CreateImageContainer();
-
-  if (retain) {
-    // Clear current image before we reset mImageContainer. Only mImageContainer
-    // is allowed to contain the image for this plugin.
-    if (mImageContainer) {
-      mImageContainer->SetCurrentImage(nsnull);
-    }
-    mImageContainer = container;
-  }
+  container = mImageContainer = LayerManager::CreateImageContainer();
 
   return container.forget();
 }
@@ -1515,7 +1484,7 @@ nsObjectFrame::GetPaintedRect(nsDisplayPlugin* aItem)
 }
 
 void
-nsObjectFrame::UpdateImageLayer(ImageContainer* aContainer, const gfxRect& aRect)
+nsObjectFrame::UpdateImageLayer(const gfxRect& aRect)
 {
   if (!mInstanceOwner) {
     return;
@@ -1524,10 +1493,13 @@ nsObjectFrame::UpdateImageLayer(ImageContainer* aContainer, const gfxRect& aRect
 #ifdef XP_MACOSX
   if (!mInstanceOwner->UseAsyncRendering()) {
     mInstanceOwner->DoCocoaEventDrawRect(aRect, nsnull);
+    // This makes sure the image on the container is up to date.
+    // XXX - Eventually we probably just want to make sure DoCocoaEventDrawRect
+    // updates the image container, to make this truly use 'push' semantics
+    // too.
+    mInstanceOwner->GetImageContainer();
   }
 #endif
-
-  mInstanceOwner->SetCurrentImage(aContainer);
 }
 
 LayerState
@@ -1538,13 +1510,6 @@ nsObjectFrame::GetLayerState(nsDisplayListBuilder* aBuilder,
     return LAYER_NONE;
 
 #ifdef XP_MACOSX
-  // Layer painting not supported without OpenGL
-  if (aManager && aManager->GetBackendType() !=
-      LayerManager::LAYERS_OPENGL) {
-    return LAYER_NONE;
-  }
-
-  // Synchronous painting, but with (gecko) layers.
   if (!mInstanceOwner->UseAsyncRendering() &&
       mInstanceOwner->IsRemoteDrawingCoreAnimation() &&
       mInstanceOwner->GetEventModel() == NPEventModelCocoa) {
@@ -1576,18 +1541,11 @@ nsObjectFrame::BuildLayer(nsDisplayListBuilder* aBuilder,
     return nsnull;
 
   // Create image
-  nsRefPtr<ImageContainer> container = GetImageContainer(aManager);
-  if (!container)
-    return nsnull;
+  nsRefPtr<ImageContainer> container = mInstanceOwner->GetImageContainer();
 
-  {
-    nsRefPtr<Image> current = container->GetCurrentImage();
-    if (!current) {
-      // Only set the current image if there isn't already one. If there is
-      // already one, InvalidateRect() will be keeping it up to date.
-      if (!mInstanceOwner->SetCurrentImage(container))
-        return nsnull;
-    }
+  if (!container) {
+    // This can occur if our instance is gone.
+    return nsnull;
   }
 
   gfxIntSize size = container->GetCurrentSize();
@@ -1611,7 +1569,7 @@ nsObjectFrame::BuildLayer(nsDisplayListBuilder* aBuilder,
     NS_ASSERTION(layer->GetType() == Layer::TYPE_IMAGE, "Bad layer type");
 
     ImageLayer* imglayer = static_cast<ImageLayer*>(layer.get());
-    UpdateImageLayer(container, r);
+    UpdateImageLayer(r);
 
     imglayer->SetContainer(container);
     gfxPattern::GraphicsFilter filter =
@@ -1694,7 +1652,6 @@ nsObjectFrame::PaintPlugin(nsDisplayListBuilder* aBuilder,
     // The matrix includes the frame's position, so we need to transform
     // from 0,0 to get the correct coordinates.
     frameGfxRect.MoveTo(0, 0);
-    matrix2d.NudgeToIntegers();
 
     mInstanceOwner->Paint(ctx, matrix2d.Transform(frameGfxRect), dirtyGfxRect);
     return;

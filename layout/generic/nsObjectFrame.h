@@ -158,7 +158,7 @@ public:
   virtual bool ReflowFinished();
   virtual void ReflowCallbackCanceled();
 
-  void UpdateImageLayer(ImageContainer* aContainer, const gfxRect& aRect);
+  void UpdateImageLayer(const gfxRect& aRect);
 
   /**
    * Builds either an ImageLayer or a ReadbackLayer, depending on the type
@@ -171,7 +171,7 @@ public:
   virtual LayerState GetLayerState(nsDisplayListBuilder* aBuilder,
                                    LayerManager* aManager);
 
-  already_AddRefed<ImageContainer> GetImageContainer(LayerManager* aManager = nsnull);
+  already_AddRefed<ImageContainer> GetImageContainer();
   /**
    * Get the rectangle (relative to this frame) which it will paint. Normally
    * the frame's content-box but may be smaller if the plugin is rendering

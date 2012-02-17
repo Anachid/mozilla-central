@@ -54,6 +54,7 @@
 #include "nsIMutableArray.h"
 #include "nsIMIMEInfo.h"
 #include "nsColor.h"
+#include "gfxRect.h"
 
 #include "nsIAndroidBridge.h"
 
@@ -155,11 +156,17 @@ public:
 
     static void NotifyIMEChange(const PRUnichar *aText, PRUint32 aTextLen, int aStart, int aEnd, int aNewEnd);
 
+    void NotifyScreenshot(unsigned char* data, int size, int tabId, int width, int height);
+
     void AcknowledgeEventSync();
 
     void EnableDeviceMotion(bool aEnable);
 
     void EnableLocation(bool aEnable);
+
+    void EnableSensor(int aSensorType);
+
+    void DisableSensor(int aSensorType);
 
     void ReturnIMEQueryResult(const PRUnichar *aResult, PRUint32 aLen, int aSelStart, int aSelLen);
 
@@ -229,7 +236,7 @@ public:
 
     void ShowInputMethodPicker();
 
-    void PreventPanning();
+    void SetPreventPanning(bool aPreventPanning);
 
     void HideProgressDialogOnce();
 
@@ -341,7 +348,7 @@ public:
 
     void *AcquireNativeWindow(jobject surface);
     void ReleaseNativeWindow(void *window);
-    bool SetNativeWindowFormat(void *window, int format);
+    bool SetNativeWindowFormat(void *window, int width, int height, int format);
 
     bool LockWindow(void *window, unsigned char **bits, int *width, int *height, int *format, int *stride);
     bool UnlockWindow(void *window);
@@ -378,6 +385,11 @@ public:
     void EnableNetworkNotifications();
     void DisableNetworkNotifications();
 
+    jobject CreateSurface();
+    void DestroySurface(jobject surface);
+    void ShowSurface(jobject surface, const gfxRect& aRect, bool aInverted, bool aBlend);
+    void HideSurface(jobject surface);
+
 protected:
     static AndroidBridge *sBridge;
 
@@ -410,9 +422,12 @@ protected:
     jmethodID jNotifyIME;
     jmethodID jNotifyIMEEnabled;
     jmethodID jNotifyIMEChange;
+    jmethodID jNotifyScreenShot;
     jmethodID jAcknowledgeEventSync;
     jmethodID jEnableDeviceMotion;
     jmethodID jEnableLocation;
+    jmethodID jEnableSensor;
+    jmethodID jDisableSensor;
     jmethodID jReturnIMEQueryResult;
     jmethodID jNotifyAppShellReady;
     jmethodID jNotifyXreExit;
@@ -433,7 +448,7 @@ protected:
     jmethodID jGetDpi;
     jmethodID jSetFullScreen;
     jmethodID jShowInputMethodPicker;
-    jmethodID jPreventPanning;
+    jmethodID jSetPreventPanning;
     jmethodID jHideProgressDialog;
     jmethodID jPerformHapticFeedback;
     jmethodID jVibrate1;

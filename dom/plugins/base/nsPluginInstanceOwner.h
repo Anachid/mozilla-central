@@ -94,6 +94,12 @@ class gfxXlibSurface;
 #include <os2.h>
 #endif
 
+#ifdef MOZ_WIDGET_ANDROID
+namespace mozilla {
+  class AndroidMediaLayer;
+}
+#endif
+
 // X.h defines KeyPress
 #ifdef KeyPress
 #undef KeyPress
@@ -176,9 +182,8 @@ public:
   bool IsRemoteDrawingCoreAnimation();
   NPEventModel GetEventModel();
   static void CARefresh(nsITimer *aTimer, void *aClosure);
-  static void AddToCARefreshTimer(nsPluginInstanceOwner *aPluginInstance);
-  static void RemoveFromCARefreshTimer(nsPluginInstanceOwner *aPluginInstance);
-  void SetupCARefresh();
+  void AddToCARefreshTimer();
+  void RemoveFromCARefreshTimer();
   // This calls into the plugin (NPP_SetWindow) and can run script.
   void* FixUpPluginWindow(PRInt32 inPaintState);
   void HidePluginWindow();
@@ -269,8 +274,10 @@ public:
   }
   
   void NotifyPaintWaiter(nsDisplayListBuilder* aBuilder);
-  // Return true if we set image with valid surface
-  bool SetCurrentImage(ImageContainer* aContainer);
+
+  // Returns the image container that has our currently displayed image.
+  already_AddRefed<ImageContainer> GetImageContainer();
+
   /**
    * Returns the bounds of the current async-rendered surface. This can only
    * change in response to messages received by the event loop (i.e. not during
@@ -286,6 +293,26 @@ public:
   void EndUpdateBackground(gfxContext* aContext, const nsIntRect& aRect);
   
   bool UseAsyncRendering();
+
+#ifdef MOZ_WIDGET_ANDROID
+  nsIntRect GetVisibleRect() {
+    return nsIntRect(0, 0, mPluginWindow->width, mPluginWindow->height);
+  }
+
+  void SetInverted(bool aInverted) {
+    mInverted = aInverted;
+  }
+
+  bool Inverted() {
+    return mInverted;
+  }
+
+  mozilla::AndroidMediaLayer* Layer() {
+    return mLayer;
+  }
+
+  void Invalidate();
+#endif
   
 private:
   
@@ -298,11 +325,16 @@ private:
   }
   
   void FixUpURLS(const nsString &name, nsAString &value);
-#ifdef ANDROID
+#ifdef MOZ_WIDGET_ANDROID
+  void SendSize(int width, int height);
+
   bool AddPluginView(const gfxRect& aRect);
   void RemovePluginView();
-  bool mPluginViewAdded;
-  gfxRect mLastPluginRect;
+
+  bool mInverted;
+
+  // For kOpenGL_ANPDrawingModel
+  nsRefPtr<mozilla::AndroidMediaLayer> mLayer;
 #endif 
  
   nsPluginNativeWindow       *mPluginWindow;

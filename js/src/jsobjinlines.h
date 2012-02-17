@@ -65,7 +65,12 @@
 
 #include "gc/Barrier.h"
 #include "js/TemplateLib.h"
+
+#include "vm/BooleanObject.h"
 #include "vm/GlobalObject.h"
+#include "vm/NumberObject.h"
+#include "vm/RegExpStatics.h"
+#include "vm/StringObject.h"
 
 #include "jsatominlines.h"
 #include "jsfuninlines.h"
@@ -76,6 +81,7 @@
 
 #include "gc/Barrier-inl.h"
 #include "vm/String-inl.h"
+#include "vm/RegExpStatics-inl.h"
 
 inline bool
 JSObject::hasPrivate() const
@@ -434,20 +440,6 @@ JSObject::setReservedSlot(uintN index, const js::Value &v)
     setSlot(index, v);
 }
 
-inline const js::Value &
-JSObject::getPrimitiveThis() const
-{
-    JS_ASSERT(isPrimitive());
-    return getFixedSlot(JSSLOT_PRIMITIVE_THIS);
-}
-
-inline void
-JSObject::setPrimitiveThis(const js::Value &pthis)
-{
-    JS_ASSERT(isPrimitive());
-    setFixedSlot(JSSLOT_PRIMITIVE_THIS, pthis);
-}
-
 inline bool
 JSObject::hasContiguousSlots(size_t start, size_t count) const
 {
@@ -630,6 +622,10 @@ inline void
 JSObject::moveDenseArrayElementsUnbarriered(uintN dstStart, uintN srcStart, uintN count)
 {
     JS_ASSERT(!compartment()->needsBarrier());
+
+    JS_ASSERT(dstStart + count <= getDenseArrayCapacity());
+    JS_ASSERT(srcStart + count <= getDenseArrayCapacity());
+
     memmove(elements + dstStart, elements + srcStart, count * sizeof(js::Value));
 }
 
@@ -920,6 +916,7 @@ inline bool JSObject::isCall() const { return hasClass(&js::CallClass); }
 inline bool JSObject::isClonedBlock() const { return isBlock() && !!getProto(); }
 inline bool JSObject::isDate() const { return hasClass(&js::DateClass); }
 inline bool JSObject::isDeclEnv() const { return hasClass(&js::DeclEnvClass); }
+inline bool JSObject::isElementIterator() const { return hasClass(&js::ElementIteratorClass); }
 inline bool JSObject::isError() const { return hasClass(&js::ErrorClass); }
 inline bool JSObject::isFunction() const { return hasClass(&js::FunctionClass); }
 inline bool JSObject::isFunctionProxy() const { return hasClass(&js::FunctionProxyClass); }
@@ -932,6 +929,7 @@ inline bool JSObject::isNumber() const { return hasClass(&js::NumberClass); }
 inline bool JSObject::isObject() const { return hasClass(&js::ObjectClass); }
 inline bool JSObject::isPrimitive() const { return isNumber() || isString() || isBoolean(); }
 inline bool JSObject::isRegExp() const { return hasClass(&js::RegExpClass); }
+inline bool JSObject::isRegExpStatics() const { return hasClass(&js::RegExpStaticsClass); }
 inline bool JSObject::isScope() const { return isCall() || isDeclEnv() || isNestedScope(); }
 inline bool JSObject::isStaticBlock() const { return isBlock() && !getProto(); }
 inline bool JSObject::isStopIteration() const { return hasClass(&js::StopIterationClass); }
@@ -1204,31 +1202,43 @@ JSObject::sizeOfThis() const
 }
 
 inline size_t
-JSObject::computedSizeOfIncludingThis() const
+JSObject::computedSizeOfThisSlotsElements() const
 {
-    size_t slotsSize, elementsSize;
-    sizeOfExcludingThis(NULL, &slotsSize, &elementsSize);
-    return sizeOfThis() + slotsSize + elementsSize;
+    size_t n = sizeOfThis();
+
+    if (hasDynamicSlots())
+        n += numDynamicSlots() * sizeof(js::Value);
+
+    if (hasDynamicElements())
+        n += (js::ObjectElements::VALUES_PER_HEADER + getElementsHeader()->capacity) *
+             sizeof(js::Value);
+
+    return n;
 }
 
 inline void
 JSObject::sizeOfExcludingThis(JSMallocSizeOfFun mallocSizeOf,
-                              size_t *slotsSize, size_t *elementsSize) const
+                              size_t *slotsSize, size_t *elementsSize,
+                              size_t *miscSize) const
 {
+    *slotsSize = 0;
     if (hasDynamicSlots()) {
-        size_t computedSize = numDynamicSlots() * sizeof(js::Value);
-        *slotsSize = mallocSizeOf ? mallocSizeOf(slots) : computedSize;
-    } else {
-        *slotsSize = 0;
+        *slotsSize += mallocSizeOf(slots);
     }
+
+    *elementsSize = 0;
     if (hasDynamicElements()) {
-        size_t computedSize =
-            (js::ObjectElements::VALUES_PER_HEADER +
-             getElementsHeader()->capacity) * sizeof(js::Value);
-        *elementsSize =
-            mallocSizeOf ? mallocSizeOf(getElementsHeader()) : computedSize;
-    } else {
-        *elementsSize = 0;
+        *elementsSize += mallocSizeOf(getElementsHeader());
+    }
+
+    /* Other things may be measured in the future if DMD indicates it is worthwhile. */
+    *miscSize = 0;
+    if (isFunction()) {
+        *miscSize += toFunction()->sizeOfMisc(mallocSizeOf);
+    } else if (isArguments()) {
+        *miscSize += asArguments().sizeOfMisc(mallocSizeOf);
+    } else if (isRegExpStatics()) {
+        *miscSize += js::SizeOfRegExpStaticsData(this, mallocSizeOf);
     }
 }
 
@@ -1595,6 +1605,16 @@ NewObjectCache::fillType(EntryIndex entry, Class *clasp, js::types::TypeObject *
     return fill(entry, clasp, type, kind, obj);
 }
 
+inline void
+NewObjectCache::copyCachedToObject(JSObject *dst, JSObject *src)
+{
+    js_memcpy(dst, src, dst->sizeOfThis());
+#ifdef JSGC_GENERATIONAL
+    Shape::writeBarrierPost(dst->shape_, &dst->shape_);
+    types::TypeObject::writeBarrierPost(dst->type_, &dst->type_);
+#endif
+}
+
 inline JSObject *
 NewObjectCache::newObjectFromHit(JSContext *cx, EntryIndex entry_)
 {
@@ -1603,7 +1623,7 @@ NewObjectCache::newObjectFromHit(JSContext *cx, EntryIndex entry_)
 
     JSObject *obj = js_TryNewGCObject(cx, entry->kind);
     if (obj) {
-        js_memcpy(obj, &entry->templateObject, entry->nbytes);
+        copyCachedToObject(obj, &entry->templateObject);
         Probes::createObject(cx, obj);
         return obj;
     }
@@ -1620,7 +1640,7 @@ NewObjectCache::newObjectFromHit(JSContext *cx, EntryIndex entry_)
 
     obj = js_NewGCObject(cx, entry->kind);
     if (obj) {
-        js_memcpy(obj, baseobj, nbytes);
+        copyCachedToObject(obj, baseobj);
         Probes::createObject(cx, obj);
         return obj;
     }
@@ -1886,6 +1906,7 @@ class PrimitiveBehavior<JSString *> {
   public:
     static inline bool isType(const Value &v) { return v.isString(); }
     static inline JSString *extract(const Value &v) { return v.toString(); }
+    static inline JSString *extract(JSObject &obj) { return obj.asString().unbox(); }
     static inline Class *getClass() { return &StringClass; }
 };
 
@@ -1894,6 +1915,7 @@ class PrimitiveBehavior<bool> {
   public:
     static inline bool isType(const Value &v) { return v.isBoolean(); }
     static inline bool extract(const Value &v) { return v.toBoolean(); }
+    static inline bool extract(JSObject &obj) { return obj.asBoolean().unbox(); }
     static inline Class *getClass() { return &BooleanClass; }
 };
 
@@ -1902,6 +1924,7 @@ class PrimitiveBehavior<double> {
   public:
     static inline bool isType(const Value &v) { return v.isNumber(); }
     static inline double extract(const Value &v) { return v.toNumber(); }
+    static inline double extract(JSObject &obj) { return obj.asNumber().unbox(); }
     static inline Class *getClass() { return &NumberClass; }
 };
 
@@ -1938,7 +1961,7 @@ BoxedPrimitiveMethodGuard(JSContext *cx, CallArgs args, Native native, T *v, boo
     if (!NonGenericMethodGuard(cx, args, native, Behavior::getClass(), ok))
         return false;
 
-    *v = Behavior::extract(thisv.toObject().getPrimitiveThis());
+    *v = Behavior::extract(thisv.toObject());
     return true;
 }
 
@@ -1953,9 +1976,18 @@ ObjectClassIs(JSObject &obj, ESClassValue classValue, JSContext *cx)
       case ESClass_Number: return obj.isNumber();
       case ESClass_String: return obj.isString();
       case ESClass_Boolean: return obj.isBoolean();
+      case ESClass_RegExp: return obj.isRegExp();
     }
     JS_NOT_REACHED("bad classValue");
     return false;
+}
+
+inline bool
+IsObjectWithClass(const Value &v, ESClassValue classValue, JSContext *cx)
+{
+    if (!v.isObject())
+        return false;
+    return ObjectClassIs(v.toObject(), classValue, cx);
 }
 
 static JS_ALWAYS_INLINE bool

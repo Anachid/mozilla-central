@@ -286,6 +286,9 @@ pref("accessibility.typeaheadfind.prefillwithselection", true);
 // use Mac OS X Appearance panel text smoothing setting when rendering text, disabled by default
 pref("gfx.use_text_smoothing_setting", false);
 
+// show checkerboard pattern on android, enabled by default (option exists for image analysis testing)
+pref("gfx.show_checkerboard_pattern", true);
+
 // loading and rendering of framesets and iframes
 pref("browser.frames.enabled", true);
 
@@ -318,6 +321,9 @@ pref("nglayout.events.dispatchLeftClickOnly", true);
 
 // whether or not to draw images while dragging
 pref("nglayout.enable_drag_images", true);
+
+// enable/disable paint flashing --- useful for debugging
+pref("nglayout.debug.paint_flashing", false);
 
 // scrollbar snapping region
 // 0 - off
@@ -628,6 +634,7 @@ pref("privacy.popups.disable_from_plugins", 2);
 pref("privacy.donottrackheader.enabled",    false);
 
 pref("dom.event.contextmenu.enabled",       true);
+pref("dom.event.clipboardevents.enabled",   true);
 
 pref("javascript.enabled",                  true);
 pref("javascript.options.strict",           false);
@@ -801,7 +808,7 @@ pref("network.http.connection-retry-timeout", 250);
 pref("network.http.fast-fallback-to-IPv4", true);
 
 // Try and use SPDY when using SSL
-pref("network.http.spdy.enabled", false);
+pref("network.http.spdy.enabled", true);
 pref("network.http.spdy.chunk-size", 4096);
 pref("network.http.spdy.timeout", 180);
 pref("network.http.spdy.coalesce-hostnames", true);
