@@ -1446,11 +1446,12 @@ typedef struct JSCountHeapTracer {
 } JSCountHeapTracer;
 
 static void
-CountHeapNotify(JSTracer *trc, void *thing, JSGCTraceKind kind)
+CountHeapNotify(JSTracer *trc, void **thingp, JSGCTraceKind kind)
 {
     JSCountHeapTracer *countTracer;
     JSDHashEntryStub *entry;
     JSCountHeapNode *node;
+    void *thing = *thingp;
 
     JS_ASSERT(trc->callback == CountHeapNotify);
     countTracer = (JSCountHeapTracer *)trc;
@@ -3872,7 +3873,7 @@ MJitCodeStats(JSContext *cx, uintN argc, jsval *vp)
 JSBool
 MJitChunkLimit(JSContext *cx, uintN argc, jsval *vp)
 {
-    if (argc > 1) {
+    if (argc > 1 || argc == 0) {
         JS_ReportError(cx, "Wrong number of arguments");
         return JS_FALSE;
     }
@@ -3884,6 +3885,10 @@ MJitChunkLimit(JSContext *cx, uintN argc, jsval *vp)
 #ifdef JS_METHODJIT
     mjit::SetChunkLimit((uint32_t) t);
 #endif
+
+    // Clear out analysis information which might refer to code compiled with
+    // the previous chunk limit.
+    JS_GC(cx);
 
     vp->setUndefined();
     return true;

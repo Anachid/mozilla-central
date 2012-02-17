@@ -720,8 +720,6 @@ JSRuntime::JSRuntime()
     gcUserAvailableChunkListHead(NULL),
     gcKeepAtoms(0),
     gcBytes(0),
-    gcTriggerBytes(0),
-    gcLastBytes(0),
     gcMaxBytes(0),
     gcMaxMallocBytes(0),
     gcNumArenasFreeCommitted(0),
@@ -1328,6 +1326,12 @@ JS_ToggleOptions(JSContext *cx, uint32_t options)
     uintN oldopts = cx->allOptions();
     uintN newopts = oldopts ^ options;
     return SetOptionsCommon(cx, newopts);
+}
+
+JS_PUBLIC_API(void)
+JS_SetJitHardening(JSRuntime *rt, JSBool enabled)
+{
+    rt->setJitHardening(!!enabled);
 }
 
 JS_PUBLIC_API(const char *)
@@ -2638,8 +2642,9 @@ typedef struct JSDumpingTracer {
 } JSDumpingTracer;
 
 static void
-DumpNotify(JSTracer *trc, void *thing, JSGCTraceKind kind)
+DumpNotify(JSTracer *trc, void **thingp, JSGCTraceKind kind)
 {
+    void *thing = *thingp;
     JSDumpingTracer *dtrc;
     JSContext *cx;
     JSDHashEntryStub *entry;
@@ -4287,7 +4292,7 @@ prop_iter_trace(JSTracer *trc, JSObject *obj)
     } else {
         /* Non-native case: mark each id in the JSIdArray private. */
         JSIdArray *ida = (JSIdArray *) pdata;
-        MarkIdRange(trc, ida->vector, ida->vector + ida->length, "prop iter");
+        MarkIdRange(trc, ida->length, ida->vector, "prop iter");
     }
 }
 
@@ -6603,7 +6608,7 @@ JS_AbortIfWrongThread(JSRuntime *rt)
 {
 #ifdef JS_THREADSAFE
     if (!rt->onOwnerThread())
-        JS_Assert("rt->onOwnerThread()", __FILE__, __LINE__);
+        MOZ_Assert("rt->onOwnerThread()", __FILE__, __LINE__);
 #endif
 }
 
