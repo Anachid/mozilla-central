@@ -99,6 +99,9 @@
 #include "mozilla/TimeStamp.h"
 #include "nsIDOMTouchEvent.h"
 #include "nsIInlineEventHandlers.h"
+#ifdef MOZ_GAMEPAD
+#include "nsDOMGamepad.h"
+#endif
 
 // JS includes
 #include "jsapi.h"
@@ -399,6 +402,8 @@ public:
   virtual NS_HIDDEN_(void) UpdateTouchState();
   virtual NS_HIDDEN_(bool) DispatchCustomEvent(const char *aEventName);
 
+  virtual NS_HIDDEN_(void) SetHasGamepadEventListener();
+
   // nsIDOMStorageIndexedDB
   NS_DECL_NSIDOMSTORAGEINDEXEDDB
 
@@ -579,12 +584,29 @@ public:
   size_t SizeOfStyleSheets(nsMallocSizeOfFun aMallocSizeOf) const;
 
   void UnmarkGrayTimers();
+  
+#ifdef MOZ_GAMEPAD
+  void AddGamepad(PRUint32 aIndex, nsDOMGamepad *aGamepad);
+  void RemoveGamepad(PRUint32 aIndex);
+  already_AddRefed<nsDOMGamepad> GetGamepad(PRUint32 aIndex);
+  void SetHasSeenGamepadInput(bool aHasSeen) { mHasSeenGamepadInput = aHasSeen; }
+  bool HasSeenGamepadInput() { return mHasSeenGamepadInput; }
+  void SyncGamepadState();
+  static PLDHashOperator EnumGamepadsForSync(const PRUint32& aKey,
+                                             nsDOMGamepad* aData,
+                                             void* userArg);
+#endif
+
 private:
   // Enable updates for the accelerometer.
   void EnableDeviceMotionUpdates();
 
   // Disables updates for the accelerometer.
   void DisableDeviceMotionUpdates();
+
+  // Enable/disable updates for gamepad input.
+  void EnableGamepadUpdates();
+  void DisableGamepadUpdates();
 
 protected:
   friend class HashchangeCallback;
@@ -900,6 +922,9 @@ protected:
   // Indicates whether this window is getting device motion change events
   bool                   mHasDeviceMotion : 1;
 
+  // Indicates whether this window wants gamepad input events
+  bool                   mHasGamepad : 1;
+
   // whether we've sent the destroy notification for our window id
   bool                   mNotifiedIDDestroyed : 1;
 
@@ -984,6 +1009,11 @@ protected:
   nsCOMPtr<nsIDocument> mSuspendedDoc;
 
   nsCOMPtr<nsIIDBFactory> mIndexedDB;
+
+#ifdef MOZ_GAMEPAD
+  nsRefPtrHashtable<nsUint32HashKey, nsDOMGamepad> mGamepads;
+  bool mHasSeenGamepadInput;
+#endif
 
   // In the case of a "trusted" dialog (@see PopupControlState), we
   // set this counter to ensure a max of MAX_DIALOG_LIMIT

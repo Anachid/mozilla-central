@@ -925,6 +925,12 @@ SpecialPowersAPI.prototype = {
     this._mfl.close();
   },
 
+  import: function(URL) {
+    let o = {};
+    Components.utils.import(URL, o);
+    return this.wrap(o);
+  },
+
   addCategoryEntry: function(category, entry, value, persists, replace) {
     Components.classes["@mozilla.org/categorymanager;1"].
       getService(Components.interfaces.nsICategoryManager).

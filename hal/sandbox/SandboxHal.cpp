@@ -164,6 +164,13 @@ PowerOff()
   Hal()->SendPowerOff();
 }
 
+//TODO: IPC implementations of these
+void StartMonitoringGamepadStatus()
+{}
+
+void StopMonitoringGamepadStatus()
+{}
+
 class HalParent : public PHalParent
                 , public BatteryObserver
                 , public NetworkObserver

@@ -106,6 +106,14 @@ GetCurrentNetworkInformation(hal::NetworkInformation* aNetworkInfo)
   aNetworkInfo->canBeMetered() = dom::network::kDefaultCanBeMetered;
 }
 
+#ifndef MOZ_GAMEPAD
+void StartMonitoringGamepadStatus()
+{}
+
+void StopMonitoringGamepadStatus()
+{}
+#endif
+
 } // hal_impl
 } // mozilla
 

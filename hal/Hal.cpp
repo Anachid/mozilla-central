@@ -382,6 +382,17 @@ void PowerOff()
 {
   AssertMainThread();
   PROXY_IF_SANDBOXED(PowerOff());
+  PROXY_IF_SANDBOXED(StartMonitoringGamepadStatus());
+}
+
+void StartMonitoringGamepadStatus()
+{
+  PROXY_IF_SANDBOXED(StartMonitoringGamepadStatus());
+}
+
+void StopMonitoringGamepadStatus()
+{
+  PROXY_IF_SANDBOXED(StopMonitoringGamepadStatus());
 }
 
 } // namespace hal

@@ -247,6 +247,10 @@
 
 #include "mozilla/dom/StructuredCloneTags.h"
 
+#ifdef MOZ_GAMEPAD
+#include "mozilla/dom/GamepadService.h"
+#endif
+
 #include "nsRefreshDriver.h"
 #include "mozAutoDocUpdate.h"
 
@@ -854,6 +858,7 @@ nsGlobalWindow::nsGlobalWindow(nsGlobalWindow *aOuterWindow)
     mShowFocusRingForContent(false),
     mFocusByKeyOccurred(false),
     mHasDeviceMotion(false),
+    mHasGamepad(false),
     mNotifiedIDDestroyed(false),
     mTimeoutInsertionPoint(nsnull),
     mTimeoutPublicIdCounter(1),
@@ -868,10 +873,17 @@ nsGlobalWindow::nsGlobalWindow(nsGlobalWindow *aOuterWindow)
 #endif
     mCleanedUp(false),
     mCallCleanUpAfterModalDialogCloses(false),
+#ifdef MOZ_GAMEPAD
+    mHasSeenGamepadInput(false),
+#endif
     mDialogAbuseCount(0),
     mDialogDisabled(false)
 {
   nsLayoutStatics::AddRef();
+
+#ifdef MOZ_GAMEPAD
+  mGamepads.Init();
+#endif
 
   // Initialize the PRCList (this).
   PR_INIT_CLIST(this);
@@ -1191,6 +1203,9 @@ nsGlobalWindow::CleanUp(bool aIgnoreModalDialog)
   if (inner) {
     inner->CleanUp(aIgnoreModalDialog);
   }
+
+  DisableGamepadUpdates();
+  mHasGamepad = false;
 
   if (mCleanMessageManager) {
     NS_ABORT_IF_FALSE(mIsChrome, "only chrome should have msg manager cleaned");
@@ -7651,6 +7666,11 @@ void nsGlobalWindow::SetIsBackground(bool aIsBackground)
   if (resetTimers) {
     ResetTimersForNonBackgroundWindow();
   }
+#ifdef MOZ_GAMEPAD
+  if (!aIsBackground) {
+    GetCurrentInnerWindowInternal()->SyncGamepadState();
+  }
+#endif
 }
 
 void nsGlobalWindow::MaybeUpdateTouchState()
@@ -7712,6 +7732,32 @@ nsGlobalWindow::DisableDeviceMotionUpdates()
     if (ac) {
       ac->RemoveWindowListener(this);
     }
+  }
+}
+
+void
+nsGlobalWindow::EnableGamepadUpdates()
+{
+  if (mHasGamepad) {
+#ifdef MOZ_GAMEPAD
+    GamepadService* gamepadsvc = GamepadService::GetService();
+    if (gamepadsvc) {
+      gamepadsvc->AddListener(this);
+    }
+#endif
+  }
+}
+
+void
+nsGlobalWindow::DisableGamepadUpdates()
+{
+  if (mHasGamepad) {
+#ifdef MOZ_GAMEPAD
+    GamepadService* gamepadsvc = GamepadService::GetService();
+    if (gamepadsvc) {
+      gamepadsvc->RemoveListener(this);
+    }
+#endif
   }
 }
 
@@ -10058,6 +10104,7 @@ nsGlobalWindow::SuspendTimeouts(PRUint32 aIncrease,
 
   if (!suspended) {
     DisableDeviceMotionUpdates();
+    DisableGamepadUpdates();
 
     // Suspend all of the workers for this window.
     nsIScriptContext *scx = GetContextInternal();
@@ -10134,6 +10181,7 @@ nsGlobalWindow::ResumeTimeouts(bool aThawChildren)
 
   if (shouldResume) {
     EnableDeviceMotionUpdates();
+    EnableGamepadUpdates();
 
     // Resume all of the workers for this window.
     nsIScriptContext *scx = GetContextInternal();
@@ -10243,6 +10291,13 @@ nsGlobalWindow::SetHasOrientationEventListener()
 }
 
 void
+nsGlobalWindow::SetHasGamepadEventListener()
+{
+  mHasGamepad = true;
+  EnableGamepadUpdates();
+}
+
+void
 nsGlobalWindow::RemoveOrientationEventListener() {
   DisableDeviceMotionUpdates();
 }
@@ -10305,6 +10360,46 @@ nsGlobalWindow::SizeOfStyleSheets(nsMallocSizeOfFun aMallocSizeOf) const
   }
   return n;
 }
+
+#ifdef MOZ_GAMEPAD
+void
+nsGlobalWindow::AddGamepad(PRUint32 aIndex, nsDOMGamepad *aGamepad)
+{
+  mGamepads.Put(aIndex, aGamepad);
+}
+
+void
+nsGlobalWindow::RemoveGamepad(PRUint32 aIndex)
+{
+  mGamepads.Remove(aIndex);
+}
+
+already_AddRefed<nsDOMGamepad>
+nsGlobalWindow::GetGamepad(PRUint32 aIndex)
+{
+  nsRefPtr<nsDOMGamepad> gamepad;
+  if (mGamepads.Get(aIndex, getter_AddRefs(gamepad)))
+    return gamepad.forget();
+
+  return NULL;
+}
+
+// static
+PLDHashOperator
+nsGlobalWindow::EnumGamepadsForSync(const PRUint32& aKey, nsDOMGamepad* aData, void* userArg)
+{
+  GamepadService::GetService()->SyncGamepadState(aKey, aData);
+  return PL_DHASH_NEXT;
+}
+
+void
+nsGlobalWindow::SyncGamepadState()
+{
+  if (mHasSeenGamepadInput) {
+    mGamepads.EnumerateRead(EnumGamepadsForSync, NULL);
+  }
+}
+#endif
 
 // nsGlobalChromeWindow implementation
 

@@ -1,11 +1,9 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
-/* vim: set sw=2 ts=8 et ft=cpp : */
 /* ***** BEGIN LICENSE BLOCK *****
  * Version: MPL 1.1/GPL 2.0/LGPL 2.1
  *
  * The contents of this file are subject to the Mozilla Public License Version
  * 1.1 (the "License"); you may not use this file except in compliance with
- * the License. You may obtain a copy of the License at:
+ * the License. You may obtain a copy of the License at
  * http://www.mozilla.org/MPL/
  *
  * Software distributed under the License is distributed on an "AS IS" basis,
@@ -13,15 +11,15 @@
  * for the specific language governing rights and limitations under the
  * License.
  *
- * The Original Code is Mozilla Code.
+ * The Original Code is Mozilla Gamepad API.
  *
  * The Initial Developer of the Original Code is
- *   The Mozilla Foundation
+ * The Mozilla Foundation.
  * Portions created by the Initial Developer are Copyright (C) 2011
  * the Initial Developer. All Rights Reserved.
  *
  * Contributor(s):
- *   Chris Jones <jones.chris.g@gmail.com>
+ *  Ted Mielczarek <ted.mielczarek@gmail.com>
  *
  * Alternatively, the contents of this file may be used under the terms of
  * either the GNU General Public License Version 2 or later (the "GPL"), or
@@ -37,87 +35,31 @@
  *
  * ***** END LICENSE BLOCK ***** */
 
-#include "Hal.h"
-#include "mozilla/dom/battery/Constants.h"
-#include "mozilla/dom/network/Constants.h"
+#ifndef nsDOMGamepadButtonEvent_h_
+#define nsDOMGamepadButtonEvent_h_
 
-using mozilla::hal::WindowIdentifier;
+#include "nsIDOMGamepadButtonEvent.h"
+#include "nsDOMEvent.h"
+#include "nsPresContext.h"
 
-namespace mozilla {
-namespace hal_impl {
-
-void
-Vibrate(const nsTArray<uint32>& pattern, const hal::WindowIdentifier &)
-{}
-
-void
-CancelVibrate(const hal::WindowIdentifier &)
-{}
-
-void
-EnableBatteryNotifications()
-{}
-
-void
-DisableBatteryNotifications()
-{}
-
-void
-GetCurrentBatteryInformation(hal::BatteryInformation* aBatteryInfo)
+class nsDOMGamepadButtonEvent : public nsDOMEvent,
+                                public nsIDOMGamepadButtonEvent
 {
-  aBatteryInfo->level() = dom::battery::kDefaultLevel;
-  aBatteryInfo->charging() = dom::battery::kDefaultCharging;
-  aBatteryInfo->remainingTime() = dom::battery::kDefaultRemainingTime;
-}
+public:
+  nsDOMGamepadButtonEvent(nsPresContext* aPresContext, nsEvent* aEvent,
+                          nsIDOMGamepad* aGamepad, PRUint32 aButton);
 
-bool
-GetScreenEnabled()
-{
-  return true;
-}
+  NS_DECL_ISUPPORTS_INHERITED
 
-void
-SetScreenEnabled(bool enabled)
-{}
+  // Forward to base class
+  NS_FORWARD_NSIDOMEVENT(nsDOMEvent::)
 
-double
-GetScreenBrightness()
-{
-  return 1;
-}
+  NS_DECL_NSIDOMGAMEPADBUTTONEVENT
 
-void
-SetScreenBrightness(double brightness)
-{}
+private:
+  ~nsDOMGamepadButtonEvent();
+  nsCOMPtr<nsIDOMGamepad> mGamepad;
+  PRUint32 mButton;
+};
 
-void
-EnableNetworkNotifications()
-{}
-
-void
-DisableNetworkNotifications()
-{}
-
-void
-GetCurrentNetworkInformation(hal::NetworkInformation* aNetworkInfo)
-{
-  aNetworkInfo->bandwidth() = dom::network::kDefaultBandwidth;
-  aNetworkInfo->canBeMetered() = dom::network::kDefaultCanBeMetered;
-}
-
-void
-Reboot()
-{}
-
-void
-PowerOff()
-{}
-
-void StartMonitoringGamepadStatus()
-{}
-
-void StopMonitoringGamepadStatus()
-{}
-
-} // hal_impl
-} // namespace mozilla
+#endif // nsDOMGamepadButtonEvent_h_

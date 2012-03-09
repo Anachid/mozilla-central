@@ -69,8 +69,15 @@ CPPSRCS     = \
   nsDeviceMotion.cpp \
   $(NULL)
 
+ifdef MOZ_GAMEPAD
+CPPSRCS += GamepadService.cpp
+endif
+
 # We fire the nsDOMDeviceAcceleration
-LOCAL_INCLUDES += -I$(topsrcdir)/content/events/src
+LOCAL_INCLUDES += \
+  -I$(topsrcdir)/content/events/src \
+  -I$(topsrcdir)/dom/base \
+  $(NULL)
 
 # On Systems that have build in geolocation providers,
 # we really do not need these.
@@ -87,6 +94,13 @@ EXPORTS     = \
   nsDeviceMotion.h \
   $(NULL)
 
+ifdef MOZ_GAMEPAD
+EXPORTS_NAMESPACES = mozilla/dom
+EXPORTS_mozilla/dom = \
+  GamepadService.h \
+  $(NULL)
+endif
+
 include $(topsrcdir)/config/config.mk
 
 # we don't want the shared lib, but we want to force the creation of a static lib.
@@ -94,5 +108,5 @@ LIBXUL_LIBRARY   = 1
 FORCE_STATIC_LIB = 1
 EXPORT_LIBRARY = 1
 
+include $(topsrcdir)/ipc/chromium/chromium-config.mk
 include $(topsrcdir)/config/rules.mk
-
